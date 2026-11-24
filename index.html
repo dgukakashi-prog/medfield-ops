@@ -1,0 +1,2779 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MedField Ops — Field Operations & Team Management</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] }
+        }
+      }
+    };
+  </script>
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .tabular-nums { font-variant-numeric: tabular-nums; }
+    @media print {
+      body * { visibility: hidden !important; }
+      #print-report-area, #print-report-area * { visibility: visible !important; }
+      #print-report-area {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        background: white !important;
+        padding: 16px !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+
+  <!-- =========================================================
+       PASTE YOUR SUPABASE CREDENTIALS BELOW
+  ========================================================== -->
+  <script>
+    const SUPABASE_URL = "https://ucudczpvoeekhxkoktez.supabase.co/rest/v1/";
+    const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_8W6Oy5GsTw1U9b6k8euhOQ_N6IwMLAc";
+  </script>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm pointer-events-none"></div>
+
+  <!-- Custom Modal Container -->
+  <div id="modal-backdrop" class="hidden fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+    <div id="modal-box" class="bg-white rounded-2xl border border-slate-200 shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-6"></div>
+  </div>
+
+  <!-- Slide-over Notification Drawer -->
+  <div id="notif-backdrop" class="hidden fixed inset-0 z-50 bg-slate-900/40 flex justify-end">
+    <div class="bg-white w-full max-w-md h-full border-l border-slate-200 shadow-2xl flex flex-col">
+      <div class="p-5 border-b border-slate-200 flex items-center justify-between">
+        <div>
+          <h2 class="text-base font-bold text-slate-900">Notification Center</h2>
+          <p class="text-xs text-slate-500">Live field rounds, approvals & task updates</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="markAllNotificationsRead()" class="text-xs font-medium text-indigo-600 hover:text-indigo-700 px-2.5 py-1.5 rounded-lg hover:bg-indigo-50">Mark all read</button>
+          <button onclick="toggleNotifDrawer(false)" class="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100">✕</button>
+        </div>
+      </div>
+      <div class="p-3 bg-slate-50 border-b border-slate-200 grid grid-cols-2 gap-2">
+        <select id="notif-filter-cat" onchange="renderNotifications()" class="text-xs rounded-lg border border-slate-200 bg-white px-2.5 py-1.5">
+          <option value="ALL">All Categories</option>
+          <option value="Field Rounds">Field Rounds</option>
+          <option value="Quota Variances">Quota Variances</option>
+          <option value="Gifts & Day-Off">Gifts & Day-Off</option>
+          <option value="Tasks">Tasks</option>
+        </select>
+        <select id="notif-filter-read" onchange="renderNotifications()" class="text-xs rounded-lg border border-slate-200 bg-white px-2.5 py-1.5">
+          <option value="ALL">All Statuses</option>
+          <option value="UNREAD">Unread Only</option>
+          <option value="READ">Read Only</option>
+        </select>
+      </div>
+      <div id="notif-list" class="flex-1 overflow-y-auto divide-y divide-slate-100"></div>
+    </div>
+  </div>
+
+  <!-- Auth Gate (Shown when Supabase is configured and user is signed out) -->
+  <div id="auth-screen" class="hidden min-h-screen flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm w-full max-w-md p-8">
+      <div class="flex items-center gap-3 mb-6">
+        <div class="w-11 h-11 rounded-xl bg-indigo-600 text-white font-bold flex items-center justify-center text-base">MF</div>
+        <div>
+          <h1 class="text-lg font-bold text-slate-900">MedField Ops</h1>
+          <p class="text-xs text-slate-500">Field Operations & Team Management</p>
+        </div>
+      </div>
+      <div id="auth-step-email">
+        <label class="block text-xs font-semibold text-slate-700 mb-1.5">Approved Gmail Address</label>
+        <input id="auth-email-input" type="email" placeholder="name@gmail.com" class="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3" />
+        <button onclick="sendLoginOtp()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm py-2.5 rounded-xl transition">Send 6-Digit Login Code</button>
+        <p class="text-xs text-slate-500 mt-3">Only email addresses registered in the Supervisor's allowlist can access live team data.</p>
+      </div>
+      <div id="auth-step-otp" class="hidden">
+        <p class="text-xs text-slate-600 mb-3">Enter the verification code sent to <span id="auth-sent-email" class="font-semibold text-slate-900"></span>.</p>
+        <input id="auth-otp-input" type="text" placeholder="123456" class="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm tabular-nums tracking-widest text-center font-semibold focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3" />
+        <button onclick="verifyLoginOtp()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm py-2.5 rounded-xl transition mb-2">Verify & Sign In</button>
+        <button onclick="resetAuthStep()" class="w-full text-xs text-slate-500 hover:text-slate-700 py-1.5">Use a different email</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main App Shell -->
+  <div id="app-shell" class="hidden pb-24">
+    <!-- Sticky Top Navigation Header -->
+    <header class="sticky top-0 z-30 bg-white/95 backdrop-blur-xs border-b border-slate-200">
+      <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+        <!-- Brand & Role Badge -->
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-indigo-600 text-white font-bold flex items-center justify-center text-sm shadow-xs">MF</div>
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-bold text-slate-900 text-base">MedField Ops</span>
+              <span id="header-role-pill" class="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200"></span>
+              <span id="mode-badge" class="text-[11px] font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600"></span>
+            </div>
+            <p class="text-xs text-slate-500">Field Visits, Samples, Plans & Approvals</p>
+          </div>
+        </div>
+
+        <!-- Global Controls -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <!-- Offline Queue & Sync Pill -->
+          <button id="sync-status-btn" onclick="openSyncModal()" class="inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border transition tabular-nums"></button>
+
+          <!-- Role / User Switcher Dropdown (Demo Mode or Supervisor Preview) -->
+          <div id="user-switcher-wrap" class="relative">
+            <select id="user-switcher" onchange="switchActiveUser(this.value)" class="text-xs font-medium rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 px-3 py-1.5 text-slate-800 max-w-[210px]"></select>
+          </div>
+
+          <!-- Gmail Allowlist Button -->
+          <button onclick="openAllowlistModal()" class="text-xs font-medium px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700">Gmail Allowlist</button>
+
+          <!-- Notifications Bell -->
+          <button onclick="toggleNotifDrawer(true)" class="relative p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700" title="Notifications">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+            <span id="notif-unread-badge" class="hidden absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-600 text-white text-[10px] font-bold flex items-center justify-center tabular-nums">0</span>
+          </button>
+
+          <!-- Export PDF Button -->
+          <button onclick="openExportPdfModal()" class="text-xs font-semibold px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white">Export PDF</button>
+
+          <!-- Sign Out (Live mode only) -->
+          <button id="signout-btn" onclick="signOutSupabase()" class="hidden text-xs font-medium px-2.5 py-1.5 rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-100">Sign Out</button>
+        </div>
+      </div>
+
+      <!-- Role Navigation Tabs -->
+      <div class="max-w-7xl mx-auto px-4 border-t border-slate-100 overflow-x-auto">
+        <nav id="role-tabs" class="flex gap-1 py-1.5"></nav>
+      </div>
+    </header>
+
+    <!-- Main Dynamic Workspace -->
+    <main id="main-content" class="max-w-7xl mx-auto px-4 py-6"></main>
+  </div>
+
+  <!-- Persistent Bottom-Right Tasks & Deadlines Banner -->
+  <div id="tasks-banner" class="hidden fixed bottom-4 right-4 z-40 w-full max-w-sm bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden">
+    <div class="px-4 py-2.5 bg-slate-900 text-white flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="text-xs font-bold">Tasks & Deadlines</span>
+        <span id="tasks-active-count" class="text-[11px] font-bold px-2 py-0.5 rounded-full bg-indigo-500 text-white tabular-nums">0</span>
+      </div>
+      <button id="tasks-toggle-btn" onclick="toggleTasksBanner()" class="text-xs font-medium text-slate-300 hover:text-white">Hide</button>
+    </div>
+    <div id="tasks-banner-body" class="p-3 max-h-72 overflow-y-auto space-y-2 bg-slate-50"></div>
+  </div>
+
+  <!-- Hidden Print-Only Report Area -->
+  <div id="print-report-area" class="hidden"></div>
+
+  <script>
+    // =========================================================
+    // 1. SUPABASE INITIALIZATION & SERVICE WORKER
+    // =========================================================
+    const isSupabaseConfigured =
+      SUPABASE_URL &&
+      !SUPABASE_URL.includes("YOUR_SUPABASE") &&
+      SUPABASE_PUBLISHABLE_KEY &&
+      !SUPABASE_PUBLISHABLE_KEY.includes("YOUR_SUPABASE");
+
+    const sb = isSupabaseConfigured
+      ? window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
+      : null;
+
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    }
+
+    // =========================================================
+    // 2. APPLICATION STATE & SEED DATA
+    // =========================================================
+    const REGIONS = ["Damascus", "Aleppo", "Homs", "Idlib", "Latakia", "Hama", "Daraa", "Tartous"];
+    const STORAGE_KEY = "medfield_ops_state_v2";
+    const QUEUE_KEY = "medfield_ops_offline_queue_v2";
+
+    let appState = null;
+    let activeUserId = null;
+    let activeTab = 0;
+    let simulatedOffline = false;
+    let offlineQueue = JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]");
+    let tasksBannerOpen = true;
+    let timerInterval = null;
+    let doctorSearchTerm = "";
+    let selectedDoctorId = "";
+    let visitTypeSelection = "Physician Visit";
+    let pendingAuthEmail = "";
+
+    function todayISO() {
+      return new Date().toISOString().slice(0, 10);
+    }
+
+    function formatDuration(sec) {
+      const s = Math.max(0, Math.floor(sec || 0));
+      const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+      const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+      const ss = String(s % 60).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    }
+
+    function uid(prefix = "id") {
+      return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+    }
+
+    function buildSeedState() {
+      const now = new Date();
+      const today = todayISO();
+      const supId = "prof_sup_01";
+
+      const members = [
+        { id: supId, email: "supervisor@medfield.org", member_code: "SUP-01", full_name: "Dr. Tariq Al-Mansour", role: "supervisor", region: "Damascus", live_status: "In the Field", active_round_started_at: null, last_round_duration_sec: 0 }
+      ];
+
+      const repNames = [
+        "Rami Khoury", "Nour Al-Hassan", "Samer Haddad", "Lina Darwish", "Ziad Nassar", "Maya Suleiman",
+        "Kareem Barakat", "Hala Mansour", "Fadi Sabbagh", "Dina Rahme", "Omar Zayat", "Rana Issa",
+        "Bassel Shaheen", "Yara Kanaan", "Tarek Hamdan", "Salma Chahine", "Bilal Awad", "Nadia Mourad",
+        "Jihad Saliba", "Mira Boutros", "Wael Karam", "Zeina Fares", "Adel Najjar", "Reem Aboud"
+      ];
+
+      repNames.forEach((name, idx) => {
+        const id = `prof_rep_${String(idx + 1).padStart(2, "0")}`;
+        const region = REGIONS[idx % REGIONS.length];
+        let status = "Inactive Yet";
+        let startedAt = null;
+        if (idx === 0) {
+          status = "In the Field";
+          startedAt = new Date(now.getTime() - 47 * 60 * 1000).toISOString();
+        } else if (idx === 1) {
+          status = "Getting Ready";
+        } else if (idx === 2) {
+          status = "Meeting Day";
+        }
+        members.push({
+          id,
+          email: `rep${idx + 1}@medfield.org`,
+          member_code: `REP-${String(idx + 1).padStart(2, "0")}`,
+          full_name: name,
+          role: "member",
+          region,
+          live_status: status,
+          active_round_started_at: startedAt,
+          last_round_duration_sec: idx === 3 ? 14220 : 0
+        });
+      });
+
+      const allowlist = members.map(m => ({
+        email: m.email,
+        role: m.role,
+        member_code: m.member_code,
+        full_name: m.full_name,
+        region: m.region
+      }));
+
+      const doctors = [
+        { id: "doc_01", name: "Dr. Marwan Al-Khatib", specialty: "Cardiology", location: "Damascus", tier_clinic: "Tier A · Al-Shami Hospital", is_active: true },
+        { id: "doc_02", name: "Dr. Samira Qabbani", specialty: "Pediatrics", location: "Damascus", tier_clinic: "Tier A · Children's Medical Center", is_active: true },
+        { id: "doc_03", name: "Dr. Walid Jaber", specialty: "Internal Medicine", location: "Aleppo", tier_clinic: "Tier A · Al-Razi Clinic", is_active: true },
+        { id: "doc_04", name: "Dr. Huda Othman", specialty: "Dermatology", location: "Aleppo", tier_clinic: "Tier B · Noor Skin Center", is_active: true },
+        { id: "doc_05", name: "Dr. Nabil Salloum", specialty: "Orthopedics", location: "Homs", tier_clinic: "Tier A · Al-Waleed Medical", is_active: true },
+        { id: "doc_06", name: "Dr. Ghada Zein", specialty: "Endocrinology", location: "Idlib", tier_clinic: "Tier B · Central Specialty Clinic", is_active: true },
+        { id: "doc_07", name: "Dr. Mazen Deeb", specialty: "Neurology", location: "Latakia", tier_clinic: "Tier A · Tishreen Polyclinic", is_active: true },
+        { id: "doc_08", name: "Dr. Rola Makhlouf", specialty: "Pulmonology", location: "Hama", tier_clinic: "Tier B · Orontes Care", is_active: true },
+        { id: "doc_09", name: "Dr. Adnan Hariri", specialty: "Cardiology", location: "Daraa", tier_clinic: "Tier A · Horan Heart Clinic", is_active: true },
+        { id: "doc_10", name: "Dr. Suhaib Wannous", specialty: "Gastroenterology", location: "Tartous", tier_clinic: "Tier B · Coastal Medical", is_active: true },
+        { id: "doc_11", name: "Al-Amal Central Pharmacy", specialty: "Retail Pharmacy", location: "Damascus", tier_clinic: "Key Account · Malki", is_active: true },
+        { id: "doc_12", name: "Al-Shifa Modern Pharmacy", specialty: "Retail Pharmacy", location: "Aleppo", tier_clinic: "Key Account · Aziziyeh", is_active: true }
+      ];
+
+      const assignments = [];
+      members.filter(m => m.role === "member").forEach(rep => {
+        doctors.forEach((doc, dIdx) => {
+          if (doc.location === rep.region || dIdx < 3) {
+            assignments.push({ doctor_id: doc.id, member_id: rep.id });
+          }
+        });
+      });
+
+      const samples = [
+        { id: "smp_01", name: "CardioPlus 10mg", unit: "Packs", category: "Cardiovascular", office_total_taken: 420, is_active: true },
+        { id: "smp_02", name: "PediaClear Syrup", unit: "Bottles", category: "Pediatrics", office_total_taken: 310, is_active: true },
+        { id: "smp_03", name: "DermaCalm Cream", unit: "Tubes", category: "Dermatology", office_total_taken: 260, is_active: true },
+        { id: "smp_04", name: "NeuroRelief 50mg", unit: "Packs", category: "Neurology", office_total_taken: 195, is_active: true },
+        { id: "smp_05", name: "GastroShield 20mg", unit: "Packs", category: "Gastroenterology", office_total_taken: 340, is_active: true }
+      ];
+
+      const inventory = [];
+      members.filter(m => m.role === "member").forEach((rep, rIdx) => {
+        samples.forEach((smp, sIdx) => {
+          const stock = (rIdx + sIdx) % 4 === 0 ? 4 : 18 + ((rIdx * 3 + sIdx * 5) % 15);
+          inventory.push({ member_id: rep.id, sample_id: smp.id, stock });
+        });
+      });
+
+      const visits = [
+        {
+          id: "vis_01",
+          member_id: "prof_rep_01",
+          doctor_id: "doc_01",
+          visit_type: "Physician Visit",
+          sample_id: "smp_01",
+          sample_qty: 3,
+          visit_date: today,
+          notes: "Discussed hypertension starter protocol and left 3 sample packs.",
+          variance_id: null,
+          created_at: new Date(now.getTime() - 25 * 60 * 1000).toISOString()
+        },
+        {
+          id: "vis_02",
+          member_id: "prof_rep_01",
+          doctor_id: "doc_11",
+          visit_type: "Pharmacy Visit",
+          sample_id: "smp_05",
+          sample_qty: 2,
+          visit_date: today,
+          notes: "Checked shelf stock and restocked GastroShield display.",
+          variance_id: null,
+          created_at: new Date(now.getTime() - 80 * 60 * 1000).toISOString()
+        },
+        {
+          id: "vis_03",
+          member_id: "prof_rep_02",
+          doctor_id: "doc_03",
+          visit_type: "Physician Visit",
+          sample_id: "smp_01",
+          sample_qty: 4,
+          visit_date: today,
+          notes: "Follow-up on patient tolerance feedback.",
+          variance_id: null,
+          created_at: new Date(now.getTime() - 40 * 60 * 1000).toISOString()
+        }
+      ];
+
+      const plans = [
+        {
+          id: "plan_01",
+          member_id: "prof_rep_01",
+          plan_name: "Damascus Week 4 Coverage",
+          plan_type: "Weekly",
+          expected_entry_time: "08:30",
+          target_doctor_ids: ["doc_01", "doc_02", "doc_11"],
+          planned_samples: { smp_01: 12, smp_02: 8, smp_05: 6 },
+          created_at: now.toISOString()
+        }
+      ];
+
+      const gift_requests = [
+        {
+          id: "gift_01",
+          member_id: "prof_rep_01",
+          gift_details: "Digital Blood Pressure Monitor for Clinic Desk",
+          estimated_price: 45,
+          buyer_role: "Member",
+          reason: "Requested by Dr. Marwan Al-Khatib for cardiology screening room.",
+          status: "Approved",
+          created_at: now.toISOString()
+        },
+        {
+          id: "gift_02",
+          member_id: "prof_rep_02",
+          gift_details: "Medical Reference Atlas Set",
+          estimated_price: 85,
+          buyer_role: "Team Supervisor",
+          reason: "Key account appreciation for Al-Razi Clinic.",
+          status: "Approved",
+          created_at: now.toISOString()
+        }
+      ];
+
+      const day_off_requests = [
+        {
+          id: "day_01",
+          member_id: "prof_rep_03",
+          requested_date: today,
+          reason: "Family medical appointment in Homs.",
+          status: "Under Review",
+          created_at: now.toISOString()
+        }
+      ];
+
+      const tasks = [
+        {
+          id: "task_01",
+          title: "Submit end-of-month pharmacy stock audit",
+          scope: "team",
+          priority: "High",
+          assigned_to: null,
+          due_date: today,
+          status: "In Progress",
+          created_at: now.toISOString()
+        },
+        {
+          id: "task_02",
+          title: "Follow up with Dr. Marwan on CardioPlus feedback",
+          scope: "individual",
+          priority: "Medium",
+          assigned_to: "prof_rep_01",
+          due_date: today,
+          status: "Open",
+          created_at: now.toISOString()
+        }
+      ];
+
+      const notifications = [
+        {
+          id: "notif_01",
+          recipient_id: supId,
+          category: "Field Rounds",
+          message: "Rami Khoury started field round in Damascus.",
+          is_read: false,
+          created_at: new Date(now.getTime() - 47 * 60 * 1000).toISOString()
+        },
+        {
+          id: "notif_02",
+          recipient_id: "prof_rep_01",
+          category: "Gifts & Day-Off",
+          message: "Your gift request (Digital Blood Pressure Monitor) was Approved.",
+          is_read: false,
+          created_at: new Date(now.getTime() - 15 * 60 * 1000).toISOString()
+        }
+      ];
+
+      return {
+        schedule_rules: { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
+        allowlist,
+        profiles: members,
+        doctors,
+        doctor_assignments: assignments,
+        samples,
+        member_sample_inventory: inventory,
+        sample_pickups: [],
+        field_sessions: [],
+        quota_variances: [],
+        visits,
+        plans,
+        gift_requests,
+        day_off_requests,
+        tasks,
+        notifications
+      };
+    }
+
+    function saveLocalState() {
+      if (!isSupabaseConfigured) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+      }
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(offlineQueue));
+    }
+
+    function showToast(msg, tone = "indigo") {
+      const colors = {
+        indigo: "bg-slate-900 text-white border-slate-800",
+        emerald: "bg-emerald-600 text-white border-emerald-700",
+        amber: "bg-amber-500 text-slate-950 border-amber-600",
+        rose: "bg-rose-600 text-white border-rose-700"
+      };
+      const el = document.createElement("div");
+      el.className = `pointer-events-auto px-4 py-3 rounded-xl border shadow-lg text-xs font-semibold transition ${colors[tone] || colors.indigo}`;
+      el.textContent = msg;
+      document.getElementById("toast-container").appendChild(el);
+      setTimeout(() => el.remove(), 3600);
+    }
+
+    function openModal(html) {
+      document.getElementById("modal-box").innerHTML = html;
+      document.getElementById("modal-backdrop").classList.remove("hidden");
+    }
+
+    function closeModal() {
+      document.getElementById("modal-backdrop").classList.add("hidden");
+    }
+
+    // =========================================================
+    // 3. AUTHENTICATION & DATA BOOTSTRAP
+    // =========================================================
+    async function bootstrap() {
+      if (!isSupabaseConfigured) {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        appState = saved ? JSON.parse(saved) : buildSeedState();
+        saveLocalState();
+        activeUserId = appState.profiles[0].id;
+        launchAppShell();
+        return;
+      }
+
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) {
+        document.getElementById("auth-screen").classList.remove("hidden");
+        return;
+      }
+      await loadLiveSupabaseState(session.user.email);
+    }
+
+    async function sendLoginOtp() {
+      const email = document.getElementById("auth-email-input").value.trim().toLowerCase();
+      if (!email) return showToast("Enter your approved Gmail address.", "amber");
+      const { error } = await sb.auth.signInWithOtp({ email });
+      if (error) return showToast(error.message, "rose");
+      pendingAuthEmail = email;
+      document.getElementById("auth-sent-email").textContent = email;
+      document.getElementById("auth-step-email").classList.add("hidden");
+      document.getElementById("auth-step-otp").classList.remove("hidden");
+      showToast("Verification code sent to your Gmail.", "emerald");
+    }
+
+    async function verifyLoginOtp() {
+      const token = document.getElementById("auth-otp-input").value.trim();
+      if (!token) return showToast("Enter the 6-digit code from your email.", "amber");
+      const { data, error } = await sb.auth.verifyOtp({
+        email: pendingAuthEmail,
+        token,
+        type: "email"
+      });
+      if (error) return showToast(error.message, "rose");
+      await loadLiveSupabaseState(data.user.email);
+    }
+
+    function resetAuthStep() {
+      document.getElementById("auth-step-otp").classList.add("hidden");
+      document.getElementById("auth-step-email").classList.remove("hidden");
+    }
+
+    async function signOutSupabase() {
+      if (sb) await sb.auth.signOut();
+      location.reload();
+    }
+
+    async function loadLiveSupabaseState(email) {
+      const [
+        allowRes, profRes, docRes, assignRes, smpRes, invRes,
+        pickRes, sessRes, varRes, visRes, planRes, giftRes,
+        dayRes, taskRes, notifRes, ruleRes
+      ] = await Promise.all([
+        sb.from("allowed_emails").select("*"),
+        sb.from("profiles").select("*").order("member_code"),
+        sb.from("doctors").select("*").order("name"),
+        sb.from("doctor_assignments").select("*"),
+        sb.from("samples").select("*").order("name"),
+        sb.from("member_sample_inventory").select("*"),
+        sb.from("sample_pickups").select("*").order("created_at", { ascending: false }),
+        sb.from("field_sessions").select("*").order("started_at", { ascending: false }),
+        sb.from("quota_variances").select("*").order("created_at", { ascending: false }),
+        sb.from("visits").select("*").order("created_at", { ascending: false }),
+        sb.from("plans").select("*").order("created_at", { ascending: false }),
+        sb.from("gift_requests").select("*").order("created_at", { ascending: false }),
+        sb.from("day_off_requests").select("*").order("created_at", { ascending: false }),
+        sb.from("tasks").select("*").order("created_at", { ascending: false }),
+        sb.from("notifications").select("*").order("created_at", { ascending: false }),
+        sb.from("schedule_rules").select("*").eq("id", 1).single()
+      ]);
+
+      const profiles = profRes.data || [];
+      const me = profiles.find(p => p.email.toLowerCase() === email.toLowerCase());
+      if (!me) {
+        showToast("Your email is not registered in profiles yet. Ask the Supervisor to add you.", "rose");
+        await sb.auth.signOut();
+        return;
+      }
+
+      appState = {
+        schedule_rules: ruleRes.data || { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
+        allowlist: allowRes.data || [],
+        profiles,
+        doctors: docRes.data || [],
+        doctor_assignments: assignRes.data || [],
+        samples: smpRes.data || [],
+        member_sample_inventory: invRes.data || [],
+        sample_pickups: pickRes.data || [],
+        field_sessions: sessRes.data || [],
+        quota_variances: varRes.data || [],
+        visits: visRes.data || [],
+        plans: planRes.data || [],
+        gift_requests: giftRes.data || [],
+        day_off_requests: dayRes.data || [],
+        tasks: taskRes.data || [],
+        notifications: notifRes.data || []
+      };
+
+      activeUserId = me.id;
+      document.getElementById("auth-screen").classList.add("hidden");
+      document.getElementById("signout-btn").classList.remove("hidden");
+      subscribeSupabaseRealtime();
+      launchAppShell();
+    }
+
+    function subscribeSupabaseRealtime() {
+      if (!sb) return;
+      sb.channel("medfield-live")
+        .on("postgres_changes", { event: "*", schema: "public" }, async () => {
+          const { data: { session } } = await sb.auth.getSession();
+          if (session) await loadLiveSupabaseState(session.user.email);
+        })
+        .subscribe();
+    }
+
+    // =========================================================
+    // 4. SHELL RENDERING & NAVIGATION
+    // =========================================================
+    function currentUser() {
+      return appState.profiles.find(p => p.id === activeUserId) || appState.profiles[0];
+    }
+
+    function supervisorUser() {
+      return appState.profiles.find(p => p.role === "supervisor") || appState.profiles[0];
+    }
+
+    function launchAppShell() {
+      document.getElementById("app-shell").classList.remove("hidden");
+      document.getElementById("tasks-banner").classList.remove("hidden");
+      renderHeader();
+      renderTabs();
+      renderMain();
+      renderTasksBanner();
+      renderNotifications();
+      startLiveTicker();
+    }
+
+    function startLiveTicker() {
+      if (timerInterval) clearInterval(timerInterval);
+      timerInterval = setInterval(() => {
+        document.querySelectorAll("[data-live-start]").forEach(el => {
+          const start = el.getAttribute("data-live-start");
+          if (start) {
+            const diff = (Date.now() - new Date(start).getTime()) / 1000;
+            el.textContent = formatDuration(diff);
+          }
+        });
+      }, 1000);
+    }
+
+    function renderHeader() {
+      const user = currentUser();
+      const rolePill = document.getElementById("header-role-pill");
+      rolePill.textContent = user.role === "supervisor"
+        ? "Supervisor / Admin"
+        : `Member · ${user.region}`;
+
+      const modeBadge = document.getElementById("mode-badge");
+      modeBadge.textContent = isSupabaseConfigured ? "Live Cloud" : "Local Demo";
+
+      const switcher = document.getElementById("user-switcher");
+      const switcherWrap = document.getElementById("user-switcher-wrap");
+      if (isSupabaseConfigured && user.role !== "supervisor") {
+        switcherWrap.classList.add("hidden");
+      } else {
+        switcherWrap.classList.remove("hidden");
+        switcher.innerHTML = appState.profiles.map(p =>
+          `<option value="${p.id}" ${p.id === user.id ? "selected" : ""}>${p.role === "supervisor" ? "★ " : ""}${p.full_name} (${p.region})</option>`
+        ).join("");
+      }
+
+      updateSyncPill();
+    }
+
+    function updateSyncPill() {
+      const btn = document.getElementById("sync-status-btn");
+      const count = offlineQueue.length;
+      if (simulatedOffline || !navigator.onLine) {
+        btn.className = "inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-amber-50 text-amber-800 border-amber-300 tabular-nums";
+        btn.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-500"></span> Offline Mode (${count})`;
+      } else if (count > 0) {
+        btn.className = "inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-indigo-50 text-indigo-700 border-indigo-300 tabular-nums";
+        btn.innerHTML = `<span class="w-2 h-2 rounded-full bg-indigo-600"></span> Pending Sync (${count})`;
+      } else {
+        btn.className = "inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-emerald-50 text-emerald-700 border-emerald-200 tabular-nums";
+        btn.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-500"></span> Online · Synced`;
+      }
+    }
+
+    function switchActiveUser(newId) {
+      activeUserId = newId;
+      activeTab = 0;
+      selectedDoctorId = "";
+      doctorSearchTerm = "";
+      renderHeader();
+      renderTabs();
+      renderMain();
+      renderTasksBanner();
+      renderNotifications();
+    }
+
+    function renderTabs() {
+      const user = currentUser();
+      const tabs = user.role === "supervisor"
+        ? ["Live Board & Visits", "Doctors, Samples & Bulk Assign", "Plans, Quota & Doctor History", "Requests & Variances", "Assign Tasks"]
+        : ["Field & Visit Log", "My Quota & Stats", "Plans & Actuals", "Samples & Inventory", "Gifts & Day-Off"];
+
+      document.getElementById("role-tabs").innerHTML = tabs.map((label, idx) => `
+        <button onclick="selectTab(${idx})" class="px-3.5 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition ${
+          activeTab === idx
+            ? "bg-indigo-600 text-white shadow-xs"
+            : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+        }">${label}</button>
+      `).join("");
+    }
+
+    function selectTab(idx) {
+      activeTab = idx;
+      renderTabs();
+      renderMain();
+    }
+
+    function renderMain() {
+      const user = currentUser();
+      const container = document.getElementById("main-content");
+      if (user.role === "supervisor") {
+        if (activeTab === 0) container.innerHTML = renderSupLiveBoard();
+        if (activeTab === 1) container.innerHTML = renderSupCatalogAndAssign();
+        if (activeTab === 2) container.innerHTML = renderSupPlansQuotaHistory();
+        if (activeTab === 3) container.innerHTML = renderSupRequests();
+        if (activeTab === 4) container.innerHTML = renderSupTasks();
+      } else {
+        if (activeTab === 0) container.innerHTML = renderMemberFieldTab();
+        if (activeTab === 1) container.innerHTML = renderMemberStatsTab();
+        if (activeTab === 2) container.innerHTML = renderMemberPlansTab();
+        if (activeTab === 3) container.innerHTML = renderMemberSamplesTab();
+        if (activeTab === 4) container.innerHTML = renderMemberGiftsDayOffTab();
+      }
+    }
+
+    // =========================================================
+    // 5. OFFLINE QUEUE, NOTIFICATIONS & ALLOWLIST
+    // =========================================================
+    async function pushNotification(recipientId, category, message) {
+      const item = {
+        id: uid("notif"),
+        recipient_id: recipientId,
+        category,
+        message,
+        is_read: false,
+        created_at: new Date().toISOString()
+      };
+      appState.notifications.unshift(item);
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("notifications").insert({
+          recipient_id: recipientId,
+          category,
+          message
+        });
+      }
+      saveLocalState();
+      renderNotifications();
+    }
+
+    function queueOfflineAction(action) {
+      offlineQueue.push({ id: uid("q"), timestamp: new Date().toISOString(), ...action });
+      saveLocalState();
+      updateSyncPill();
+    }
+
+    function openSyncModal() {
+      openModal(`
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-base font-bold text-slate-900">Offline Queue & Sync</h3>
+          <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+        </div>
+        <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 mb-4 flex items-center justify-between">
+          <div>
+            <p class="text-sm font-semibold text-slate-900">Simulated Offline Mode</p>
+            <p class="text-xs text-slate-500">Queue new visits and timer actions locally when signal drops.</p>
+          </div>
+          <button onclick="toggleSimulatedOffline()" class="px-3 py-1.5 rounded-xl text-xs font-semibold ${
+            simulatedOffline ? "bg-amber-500 text-slate-950" : "bg-slate-200 text-slate-800"
+          }">${simulatedOffline ? "ON (Offline)" : "OFF (Online)"}</button>
+        </div>
+        <div class="mb-4">
+          <p class="text-xs font-semibold text-slate-700 mb-2 tabular-nums">Queued Actions (${offlineQueue.length})</p>
+          <div class="max-h-44 overflow-y-auto space-y-1.5">
+            ${offlineQueue.length === 0
+              ? `<p class="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-200 rounded-xl">All local actions are synced.</p>`
+              : offlineQueue.map(q => `<div class="text-xs p-2.5 rounded-lg bg-amber-50 border border-amber-200 flex justify-between"><span>${q.label}</span><span class="text-slate-500 tabular-nums">${q.timestamp.slice(11, 19)}</span></div>`).join("")}
+          </div>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Close</button>
+          <button onclick="syncNow()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white">Sync Now</button>
+        </div>
+      `);
+    }
+
+    function toggleSimulatedOffline() {
+      simulatedOffline = !simulatedOffline;
+      updateSyncPill();
+      openSyncModal();
+      showToast(simulatedOffline ? "Simulated Offline Mode enabled." : "Back online.", simulatedOffline ? "amber" : "emerald");
+    }
+
+    async function syncNow() {
+      if (simulatedOffline) {
+        return showToast("Turn off Simulated Offline Mode before syncing.", "amber");
+      }
+      if (offlineQueue.length === 0) {
+        closeModal();
+        return showToast("Everything is already synced.", "emerald");
+      }
+      const user = currentUser();
+      const sup = supervisorUser();
+      if (isSupabaseConfigured) {
+        for (const item of offlineQueue) {
+          if (item.type === "visit") {
+            await sb.rpc("log_visit_atomic", item.payload);
+          } else if (item.type === "status") {
+            await sb.from("profiles").update(item.payload).eq("id", item.member_id);
+          }
+        }
+      }
+      const count = offlineQueue.length;
+      offlineQueue = [];
+      saveLocalState();
+      updateSyncPill();
+      await pushNotification(sup.id, "Field Rounds", `${user.full_name} synced ${count} offline action(s).`);
+      closeModal();
+      showToast(`Synced ${count} queued action(s).`, "emerald");
+      renderMain();
+    }
+
+    function toggleNotifDrawer(open) {
+      document.getElementById("notif-backdrop").classList.toggle("hidden", !open);
+      if (open) renderNotifications();
+    }
+
+    function renderNotifications() {
+      const user = currentUser();
+      const cat = document.getElementById("notif-filter-cat")?.value || "ALL";
+      const readFilter = document.getElementById("notif-filter-read")?.value || "ALL";
+      const mine = appState.notifications.filter(n => n.recipient_id === user.id);
+      const unreadCount = mine.filter(n => !n.is_read).length;
+
+      const badge = document.getElementById("notif-unread-badge");
+      badge.textContent = unreadCount;
+      badge.classList.toggle("hidden", unreadCount === 0);
+
+      const filtered = mine.filter(n => {
+        if (cat !== "ALL" && n.category !== cat) return false;
+        if (readFilter === "UNREAD" && n.is_read) return false;
+        if (readFilter === "READ" && !n.is_read) return false;
+        return true;
+      });
+
+      const list = document.getElementById("notif-list");
+      if (!list) return;
+      list.innerHTML = filtered.length === 0
+        ? `<p class="text-xs text-slate-500 text-center py-10">No notifications match this filter.</p>`
+        : filtered.map(n => `
+          <div onclick="markNotifRead('${n.id}')" class="p-4 cursor-pointer hover:bg-slate-50 transition ${n.is_read ? "opacity-65" : "bg-indigo-50/40"}">
+            <div class="flex items-center justify-between gap-2 mb-1">
+              <span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">${n.category}</span>
+              <span class="text-[11px] text-slate-400 tabular-nums">${new Date(n.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+            </div>
+            <p class="text-xs text-slate-800 font-medium">${n.message}</p>
+          </div>
+        `).join("");
+    }
+
+    async function markNotifRead(id) {
+      const n = appState.notifications.find(x => x.id === id);
+      if (n && !n.is_read) {
+        n.is_read = true;
+        if (isSupabaseConfigured && !simulatedOffline) {
+          await sb.from("notifications").update({ is_read: true }).eq("id", id);
+        }
+        saveLocalState();
+        renderNotifications();
+      }
+    }
+
+    async function markAllNotificationsRead() {
+      const user = currentUser();
+      appState.notifications.forEach(n => { if (n.recipient_id === user.id) n.is_read = true; });
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("notifications").update({ is_read: true }).eq("recipient_id", user.id);
+      }
+      saveLocalState();
+      renderNotifications();
+    }
+
+    function openAllowlistModal() {
+      const user = currentUser();
+      const isSup = user.role === "supervisor";
+      openModal(`
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-base font-bold text-slate-900">Gmail Access & Allowlist</h3>
+          <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+        </div>
+        <div class="mb-4">
+          <label class="block text-xs font-semibold text-slate-700 mb-1">Check Email Status</label>
+          <div class="flex gap-2">
+            <input id="check-allow-input" type="email" placeholder="rep@gmail.com" class="flex-1 rounded-xl border border-slate-300 px-3 py-2 text-xs" />
+            <button onclick="checkAllowlistEmail()" class="px-3 py-2 rounded-xl bg-slate-900 text-white text-xs font-semibold">Verify</button>
+          </div>
+          <p id="check-allow-result" class="text-xs mt-1.5 font-medium"></p>
+        </div>
+        ${isSup ? `
+          <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-200 mb-4 space-y-2">
+            <p class="text-xs font-bold text-slate-800">Add Approved Gmail Member</p>
+            <div class="grid grid-cols-2 gap-2">
+              <input id="new-allow-email" type="email" placeholder="newrep@gmail.com" class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs bg-white" />
+              <input id="new-allow-name" type="text" placeholder="Full Name" class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs bg-white" />
+              <select id="new-allow-region" class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs bg-white">
+                ${REGIONS.map(r => `<option value="${r}">${r}</option>`).join("")}
+              </select>
+              <select id="new-allow-role" class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs bg-white">
+                <option value="member">Field Member</option>
+                <option value="supervisor">Supervisor</option>
+              </select>
+            </div>
+            <button onclick="addAllowlistEmail()" class="w-full py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold">Add to Allowlist</button>
+          </div>
+        ` : ""}
+        <div class="max-h-48 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl">
+          ${appState.allowlist.map(a => `
+            <div class="px-3 py-2 flex items-center justify-between text-xs">
+              <div>
+                <span class="font-semibold text-slate-900">${a.email}</span>
+                <span class="text-slate-500 ml-1">(${a.full_name} · ${a.region})</span>
+              </div>
+              ${isSup && a.email !== user.email
+                ? `<button onclick="removeAllowlistEmail('${a.email}')" class="text-rose-600 hover:underline font-semibold">Remove</button>`
+                : `<span class="text-[11px] font-semibold text-emerald-700">${a.role}</span>`}
+            </div>
+          `).join("")}
+        </div>
+      `);
+    }
+
+    function checkAllowlistEmail() {
+      const val = document.getElementById("check-allow-input").value.trim().toLowerCase();
+      const found = appState.allowlist.find(a => a.email.toLowerCase() === val);
+      const out = document.getElementById("check-allow-result");
+      if (found) {
+        out.className = "text-xs mt-1.5 font-semibold text-emerald-700";
+        out.textContent = `Approved: ${found.full_name} (${found.role} · ${found.region})`;
+      } else {
+        out.className = "text-xs mt-1.5 font-semibold text-rose-600";
+        out.textContent = "Not on approved Gmail allowlist.";
+      }
+    }
+
+    async function addAllowlistEmail() {
+      const email = document.getElementById("new-allow-email").value.trim().toLowerCase();
+      const full_name = document.getElementById("new-allow-name").value.trim();
+      const region = document.getElementById("new-allow-region").value;
+      const role = document.getElementById("new-allow-role").value;
+      if (!email || !full_name) return showToast("Enter email and full name.", "amber");
+      const member_code = `REP-${String(appState.profiles.length + 1).padStart(2, "0")}`;
+
+      if (isSupabaseConfigured) {
+        const { error: e1 } = await sb.from("allowed_emails").insert({ email, role, member_code, full_name, region });
+        if (e1) return showToast(e1.message, "rose");
+        const { data: prof } = await sb.from("profiles").insert({ email, role, member_code, full_name, region }).select().single();
+        if (prof) appState.profiles.push(prof);
+      } else {
+        appState.profiles.push({
+          id: uid("prof"), email, member_code, full_name, role, region,
+          live_status: "Inactive Yet", active_round_started_at: null, last_round_duration_sec: 0
+        });
+      }
+      appState.allowlist.push({ email, role, member_code, full_name, region });
+      saveLocalState();
+      showToast("Added to Gmail allowlist & team profiles.", "emerald");
+      openAllowlistModal();
+      renderHeader();
+    }
+
+    async function removeAllowlistEmail(email) {
+      appState.allowlist = appState.allowlist.filter(a => a.email !== email);
+      if (isSupabaseConfigured) {
+        await sb.from("allowed_emails").delete().eq("email", email);
+      }
+      saveLocalState();
+      showToast("Removed from allowlist.", "indigo");
+      openAllowlistModal();
+    }
+
+    // =========================================================
+    // 6. PERSISTENT TASKS & DEADLINES BANNER
+    // =========================================================
+    function toggleTasksBanner() {
+      tasksBannerOpen = !tasksBannerOpen;
+      document.getElementById("tasks-banner-body").classList.toggle("hidden", !tasksBannerOpen);
+      document.getElementById("tasks-toggle-btn").textContent = tasksBannerOpen ? "Hide" : "Show";
+    }
+
+    function visibleTasksForCurrentUser() {
+      const user = currentUser();
+      if (user.role === "supervisor") return appState.tasks;
+      return appState.tasks.filter(t => t.scope === "team" || t.assigned_to === user.id);
+    }
+
+    function renderTasksBanner() {
+      const tasks = visibleTasksForCurrentUser();
+      const openCount = tasks.filter(t => t.status !== "Completed").length;
+      document.getElementById("tasks-active-count").textContent = openCount;
+
+      const prioColors = {
+        High: "bg-rose-50 text-rose-700 border-rose-200",
+        Medium: "bg-amber-50 text-amber-800 border-amber-200",
+        Low: "bg-slate-100 text-slate-700 border-slate-200"
+      };
+
+      const body = document.getElementById("tasks-banner-body");
+      body.innerHTML = tasks.length === 0
+        ? `<p class="text-xs text-slate-500 text-center py-4">No active tasks.</p>`
+        : tasks.map(t => {
+          const owner = t.scope === "team"
+            ? "All Team (25)"
+            : (appState.profiles.find(p => p.id === t.assigned_to)?.full_name || "Assigned Rep");
+          return `
+            <div class="p-3 rounded-xl bg-white border border-slate-200 shadow-2xs">
+              <div class="flex items-center justify-between gap-1.5 mb-1.5 flex-wrap">
+                <div class="flex items-center gap-1">
+                  <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700">${t.scope === "team" ? "Team" : "Assigned"}</span>
+                  <span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${prioColors[t.priority] || prioColors.Low}">${t.priority} Priority</span>
+                </div>
+                <span class="text-[11px] text-slate-500 tabular-nums">Due ${t.due_date}</span>
+              </div>
+              <p class="text-xs font-semibold text-slate-900 mb-1">${t.title}</p>
+              <div class="flex items-center justify-between mt-2">
+                <span class="text-[11px] text-slate-500">${owner}</span>
+                <button onclick="cycleTaskStatus('${t.id}')" class="text-[11px] font-semibold px-2.5 py-1 rounded-lg border ${
+                  t.status === "Completed"
+                    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                    : t.status === "In Progress"
+                    ? "bg-amber-50 text-amber-800 border-amber-200"
+                    : "bg-slate-100 text-slate-700 border-slate-200"
+                }">${t.status}</button>
+              </div>
+            </div>
+          `;
+        }).join("");
+    }
+
+    async function cycleTaskStatus(taskId) {
+      const task = appState.tasks.find(t => t.id === taskId);
+      if (!task) return;
+      const order = ["Open", "In Progress", "Completed"];
+      task.status = order[(order.indexOf(task.status) + 1) % order.length];
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("tasks").update({ status: task.status }).eq("id", taskId);
+      }
+      saveLocalState();
+      renderTasksBanner();
+      if (currentUser().role === "supervisor" && activeTab === 4) renderMain();
+      await pushNotification(supervisorUser().id, "Tasks", `${currentUser().full_name} marked task "${task.title}" as ${task.status}.`);
+      showToast(`Task status: ${task.status}`, "indigo");
+    }
+
+    // =========================================================
+    // 7. FILTERED PDF REPORT EXPORT
+    // =========================================================
+    function openExportPdfModal() {
+      const user = currentUser();
+      const today = todayISO();
+      openModal(`
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-base font-bold text-slate-900">Filtered PDF Report Export</h3>
+          <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600">✕</button>
+        </div>
+        <div class="space-y-3 text-xs">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1">From Date</label>
+              <input id="pdf-from" type="date" value="${today}" class="w-full rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
+            </div>
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1">To Date</label>
+              <input id="pdf-to" type="date" value="${today}" class="w-full rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
+            </div>
+          </div>
+          ${user.role === "supervisor" ? `
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1">Team Member</label>
+              <select id="pdf-member" class="w-full rounded-xl border border-slate-300 px-3 py-2">
+                <option value="ALL">All Team Members</option>
+                ${appState.profiles.filter(p => p.role === "member").map(p => `<option value="${p.id}">${p.full_name} (${p.region})</option>`).join("")}
+              </select>
+            </div>
+          ` : `<input type="hidden" id="pdf-member" value="${user.id}" />`}
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">Report Category</label>
+            <select id="pdf-cat" class="w-full rounded-xl border border-slate-300 px-3 py-2">
+              <option value="ALL">All Categories</option>
+              <option value="VISITS">Visits</option>
+              <option value="SAMPLES">Samples & Inventory</option>
+              <option value="PLANS">Plans</option>
+              <option value="REQUESTS">Gifts & Day-Off Requests</option>
+              <option value="TASKS">Tasks</option>
+            </select>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 mt-5">
+          <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
+          <button onclick="runPdfExport()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white">Generate & Print PDF</button>
+        </div>
+      `);
+    }
+
+    function runPdfExport() {
+      const from = document.getElementById("pdf-from").value;
+      const to = document.getElementById("pdf-to").value;
+      const memberId = document.getElementById("pdf-member").value;
+      const cat = document.getElementById("pdf-cat").value;
+
+      const visits = appState.visits.filter(v =>
+        (!from || v.visit_date >= from) &&
+        (!to || v.visit_date <= to) &&
+        (memberId === "ALL" || v.member_id === memberId)
+      );
+
+      const printArea = document.getElementById("print-report-area");
+      printArea.innerHTML = `
+        <div class="border-b-2 border-slate-900 pb-3 mb-4 flex justify-between items-end">
+          <div>
+            <h1 class="text-xl font-bold">MedField Ops — Operational Report</h1>
+            <p class="text-xs text-slate-600 tabular-nums">Period: ${from} to ${to} · Category: ${cat}</p>
+          </div>
+          <p class="text-xs text-slate-500 tabular-nums">Generated ${new Date().toLocaleString()}</p>
+        </div>
+        <h2 class="text-sm font-bold mb-2 tabular-nums">Logged Visits (${visits.length})</h2>
+        <table class="w-full text-left border-collapse text-xs mb-6">
+          <thead>
+            <tr class="border-b border-slate-300 bg-slate-100">
+              <th class="p-2">Date</th><th class="p-2">Rep</th><th class="p-2">Doctor / Account</th><th class="p-2">Type</th><th class="p-2">Samples</th><th class="p-2">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${visits.map(v => {
+              const rep = appState.profiles.find(p => p.id === v.member_id)?.full_name || "";
+              const doc = appState.doctors.find(d => d.id === v.doctor_id)?.name || "";
+              const smp = appState.samples.find(s => s.id === v.sample_id)?.name || "None";
+              return `<tr class="border-b border-slate-200"><td class="p-2 tabular-nums">${v.visit_date}</td><td class="p-2">${rep}</td><td class="p-2">${doc}</td><td class="p-2">${v.visit_type}</td><td class="p-2 tabular-nums">${v.sample_qty} × ${smp}</td><td class="p-2">${v.notes || ""}</td></tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      `;
+      closeModal();
+      setTimeout(() => window.print(), 150);
+    }
+
+    // =========================================================
+    // 8. FIELD MEMBER VIEWS (5 TABS)
+    // =========================================================
+    function getMemberMetrics(memberId) {
+      const today = todayISO();
+      const now = new Date();
+      const weekAgo = new Date(now.getTime() - 7 * 86400000).toISOString().slice(0, 10);
+      const monthPrefix = today.slice(0, 7);
+      const yearPrefix = today.slice(0, 4);
+
+      const myVisits = appState.visits.filter(v => v.member_id === memberId);
+      const daily = myVisits.filter(v => v.visit_date === today).length;
+      const weekly = myVisits.filter(v => v.visit_date >= weekAgo).length;
+      const monthly = myVisits.filter(v => v.visit_date.startsWith(monthPrefix)).length;
+      const annual = myVisits.filter(v => v.visit_date.startsWith(yearPrefix)).length;
+
+      return { myVisits, daily, weekly, monthly, annual };
+    }
+
+    function assignedDoctorsFor(memberId) {
+      const docIds = new Set(appState.doctor_assignments.filter(a => a.member_id === memberId).map(a => a.doctor_id));
+      return appState.doctors.filter(d => d.is_active && docIds.has(d.id));
+    }
+
+    function renderMemberFieldTab() {
+      const user = currentUser();
+      const rules = appState.schedule_rules;
+      const metrics = getMemberMetrics(user.id);
+      const assignedDocs = assignedDoctorsFor(user.id);
+      const activeSamples = appState.samples.filter(s => s.is_active);
+      const pct = Math.min(100, Math.round((metrics.weekly / Math.max(1, rules.weekly_target)) * 100));
+
+      const filteredDocs = assignedDocs.filter(d => {
+        const q = doctorSearchTerm.toLowerCase();
+        return !q || d.name.toLowerCase().includes(q) || d.specialty.toLowerCase().includes(q) || d.location.toLowerCase().includes(q);
+      });
+
+      const chosenDoc = assignedDocs.find(d => d.id === selectedDoctorId) || null;
+      const lastDocVisit = chosenDoc
+        ? metrics.myVisits.find(v => v.doctor_id === chosenDoc.id)
+        : null;
+
+      const statusColors = {
+        "Inactive Yet": "bg-slate-100 text-slate-700",
+        "Getting Ready": "bg-amber-100 text-amber-800",
+        "In the Field": "bg-emerald-100 text-emerald-800",
+        "Meeting Day": "bg-indigo-100 text-indigo-800",
+        "Finished Field": "bg-slate-200 text-slate-800"
+      };
+
+      const elapsedSec = user.live_status === "In the Field" && user.active_round_started_at
+        ? (Date.now() - new Date(user.active_round_started_at).getTime()) / 1000
+        : (user.last_round_duration_sec || 0);
+
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <!-- Left Column: Timer, Quota & Visit Form -->
+          <div class="lg:col-span-2 space-y-6">
+            <!-- Field Round Lifecycle & Live Timer -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-5">
+              <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                <div>
+                  <span class="text-xs font-semibold text-slate-500">Field Round Status</span>
+                  <div class="flex items-center gap-2.5 mt-1">
+                    <span class="text-xs font-bold px-3 py-1 rounded-full ${statusColors[user.live_status] || statusColors["Inactive Yet"]}">${user.live_status}</span>
+                    <span class="text-2xl font-bold text-slate-900 tabular-nums" ${user.live_status === "In the Field" && user.active_round_started_at ? `data-live-start="${user.active_round_started_at}"` : ""}>${formatDuration(elapsedSec)}</span>
+                  </div>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                  <button onclick="setFieldStatus('Getting Ready')" class="px-3.5 py-2 rounded-xl text-xs font-semibold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200">Getting Ready</button>
+                  <button onclick="setFieldStatus('In the Field')" class="px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white">Start Field Round</button>
+                  <button onclick="setFieldStatus('Finished Field')" class="px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white">End Field Round</button>
+                </div>
+              </div>
+
+              <!-- Visit Quota Tracker -->
+              <div class="pt-4 border-t border-slate-100">
+                <div class="flex flex-wrap items-center justify-between gap-2 text-xs mb-2 tabular-nums">
+                  <span class="font-semibold text-slate-700">Today: <strong class="text-slate-900">${metrics.daily}/${rules.daily_target}</strong></span>
+                  <span class="font-semibold text-slate-700">7-Day Done: <strong class="text-slate-900">${metrics.weekly}/${rules.weekly_target}</strong></span>
+                  <span class="font-semibold text-indigo-700">Remaining Weekly: <strong>${Math.max(0, rules.weekly_target - metrics.weekly)}</strong></span>
+                </div>
+                <div class="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div class="h-full bg-indigo-600 rounded-full transition-all" style="width:${pct}%"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Register Field Visit Form -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-5">
+              <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+                <h2 class="text-base font-bold text-slate-900">Register Field Visit</h2>
+                <button onclick="repeatLastVisit()" class="text-xs font-semibold px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200">↻ Repeat Last Visit</button>
+              </div>
+
+              <!-- Quick Doctor Shortcuts -->
+              <div class="mb-4">
+                <p class="text-[11px] font-semibold text-slate-500 mb-1.5">Quick Doctor Shortcuts</p>
+                <div class="flex flex-wrap gap-1.5">
+                  ${assignedDocs.slice(0, 6).map(d => `
+                    <button type="button" onclick="selectDoctorForVisit('${d.id}')" class="text-xs px-2.5 py-1 rounded-full border transition ${
+                      selectedDoctorId === d.id
+                        ? "bg-indigo-600 text-white border-indigo-600"
+                        : "bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
+                    }">${d.name}</button>
+                  `).join("")}
+                </div>
+              </div>
+
+              <!-- Visit Type Toggle -->
+              <div class="grid grid-cols-2 gap-2 mb-4">
+                ${["Physician Visit", "Pharmacy Visit"].map(t => `
+                  <button type="button" onclick="setVisitType('${t}')" class="py-2 rounded-xl text-xs font-semibold border transition ${
+                    visitTypeSelection === t
+                      ? "bg-indigo-600 text-white border-indigo-600"
+                      : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                  }">${t}</button>
+                `).join("")}
+              </div>
+
+              <!-- Type-Ahead Doctor Search -->
+              <div class="mb-3">
+                <label class="block text-xs font-semibold text-slate-700 mb-1">Search Assigned Doctor / Account</label>
+                <input type="text" value="${doctorSearchTerm}" oninput="doctorSearchTerm=this.value; renderMain();" placeholder="Type name, specialty, or city..." class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs mb-2" />
+                <select id="visit-doctor-select" onchange="selectDoctorForVisit(this.value)" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs bg-white">
+                  <option value="">-- Select Assigned Doctor (${filteredDocs.length}) --</option>
+                  ${filteredDocs.map(d => `<option value="${d.id}" ${d.id === selectedDoctorId ? "selected" : ""}>${d.name} · ${d.specialty} (${d.location})</option>`).join("")}
+                </select>
+              </div>
+
+              ${chosenDoc ? `
+                <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-200 mb-4 text-xs">
+                  <div class="flex flex-wrap justify-between gap-2 font-semibold text-slate-900">
+                    <span>${chosenDoc.name} · ${chosenDoc.specialty}</span>
+                    <span class="text-indigo-700">${chosenDoc.tier_clinic}</span>
+                  </div>
+                  <p class="text-slate-500 mt-1 tabular-nums">
+                    ${lastDocVisit
+                      ? `Last Visit: ${lastDocVisit.visit_date} (${lastDocVisit.visit_type}) · ${lastDocVisit.sample_qty} × ${appState.samples.find(s => s.id === lastDocVisit.sample_id)?.name || "No sample"}`
+                      : "No prior visits logged for this doctor."}
+                  </p>
+                </div>
+              ` : ""}
+
+              <!-- Sample & Quantity -->
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                <div class="sm:col-span-2">
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Sample Provided</label>
+                  <select id="visit-sample-select" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs bg-white tabular-nums">
+                    <option value="">No Sample Provided</option>
+                    ${activeSamples.map(s => {
+                      const inv = appState.member_sample_inventory.find(i => i.member_id === user.id && i.sample_id === s.id);
+                      const stock = inv ? inv.stock : 0;
+                      return `<option value="${s.id}">${s.name} (Stock: ${stock} ${s.unit})</option>`;
+                    }).join("")}
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Quantity</label>
+                  <input id="visit-sample-qty" type="number" min="0" value="1" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs tabular-nums" />
+                </div>
+              </div>
+
+              <!-- Date & Notes -->
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                <div>
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Visit Date</label>
+                  <input id="visit-date-input" type="date" value="${todayISO()}" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs tabular-nums" />
+                </div>
+                <div class="sm:col-span-2">
+                  <label class="block text-xs font-semibold text-slate-700 mb-1">Visit Notes</label>
+                  <input id="visit-notes-input" type="text" placeholder="Key discussion points or follow-up..." class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs" />
+                </div>
+              </div>
+
+              <button onclick="attemptSubmitVisit()" class="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs transition">Log Field Visit</button>
+            </div>
+          </div>
+
+          <!-- Right Column: My Logged Visits -->
+          <div class="bg-white rounded-2xl border border-slate-200 p-5 h-fit">
+            <h2 class="text-base font-bold text-slate-900 mb-1 tabular-nums">My Logged Visits (${metrics.myVisits.length})</h2>
+            <p class="text-xs text-slate-500 mb-4">Editable within 60 minutes of submission</p>
+            <div class="space-y-3 max-h-[680px] overflow-y-auto">
+              ${metrics.myVisits.length === 0
+                ? `<p class="text-xs text-slate-500 text-center py-8">No visits logged yet.</p>`
+                : metrics.myVisits.map(v => {
+                  const doc = appState.doctors.find(d => d.id === v.doctor_id)?.name || "Unknown Doctor";
+                  const smp = appState.samples.find(s => s.id === v.sample_id);
+                  const ageMin = Math.floor((Date.now() - new Date(v.created_at).getTime()) / 60000);
+                  const editable = ageMin < 60;
+                  const variance = v.variance_id ? appState.quota_variances.find(q => q.id === v.variance_id) : null;
+                  const rejected = variance && variance.status === "Rejected";
+
+                  return `
+                    <div class="p-3.5 rounded-xl border ${rejected ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50/60"}">
+                      <div class="flex items-start justify-between gap-2">
+                        <div>
+                          <p class="text-xs font-bold text-slate-900">${doc}</p>
+                          <p class="text-[11px] text-slate-500 tabular-nums">${v.visit_type} · ${v.visit_date}</p>
+                        </div>
+                        ${editable
+                          ? `<button onclick="openEditVisitModal('${v.id}')" class="text-[11px] font-semibold px-2 py-1 rounded-lg bg-white border border-slate-200 text-indigo-700 hover:bg-indigo-50 tabular-nums">Edit (${60 - ageMin}m left)</button>`
+                          : `<span class="text-[10px] font-medium text-slate-400 tabular-nums">Edit Locked (&gt;1h)</span>`}
+                      </div>
+                      ${rejected ? `<span class="inline-block mt-1.5 text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-600 text-white">Rejected Variance</span>` : ""}
+                      <p class="text-xs text-slate-700 mt-2 tabular-nums">
+                        ${smp && v.sample_qty > 0 ? `Sample: <strong>${v.sample_qty} ${smp.unit}</strong> ${smp.name}` : "No sample given"}
+                      </p>
+                      ${v.notes ? `<p class="text-[11px] text-slate-500 mt-1">${v.notes}</p>` : ""}
+                    </div>
+                  `;
+                }).join("")}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function setFieldStatus(newStatus) {
+      const user = currentUser();
+      const sup = supervisorUser();
+      const nowIso = new Date().toISOString();
+
+      if (newStatus === "In the Field") {
+        user.live_status = "In the Field";
+        user.active_round_started_at = nowIso;
+        await pushNotification(sup.id, "Field Rounds", `${user.full_name} started field round in ${user.region}.`);
+      } else if (newStatus === "Finished Field") {
+        const dur = user.active_round_started_at
+          ? Math.floor((Date.now() - new Date(user.active_round_started_at).getTime()) / 1000)
+          : 0;
+        user.live_status = "Finished Field";
+        user.last_round_duration_sec = dur;
+        user.active_round_started_at = null;
+        appState.field_sessions.unshift({
+          id: uid("sess"), member_id: user.id, started_at: nowIso, ended_at: nowIso, duration_sec: dur
+        });
+        await pushNotification(sup.id, "Field Rounds", `${user.full_name} finished field round (${formatDuration(dur)}).`);
+      } else {
+        user.live_status = newStatus;
+        await pushNotification(sup.id, "Field Rounds", `${user.full_name} set status to ${newStatus} at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
+      }
+
+      const payload = {
+        live_status: user.live_status,
+        active_round_started_at: user.active_round_started_at,
+        last_round_duration_sec: user.last_round_duration_sec
+      };
+
+      if (simulatedOffline || !navigator.onLine) {
+        queueOfflineAction({ type: "status", label: `Status → ${newStatus}`, member_id: user.id, payload });
+      } else if (isSupabaseConfigured) {
+        await sb.from("profiles").update(payload).eq("id", user.id);
+      }
+
+      saveLocalState();
+      renderMain();
+      showToast(`Status updated: ${newStatus}`, "emerald");
+    }
+
+    function selectDoctorForVisit(docId) {
+      selectedDoctorId = docId;
+      renderMain();
+    }
+
+    function setVisitType(t) {
+      visitTypeSelection = t;
+      renderMain();
+    }
+
+    function repeatLastVisit() {
+      const user = currentUser();
+      const last = appState.visits.find(v => v.member_id === user.id);
+      if (!last) return showToast("No previous visit to repeat.", "amber");
+      selectedDoctorId = last.doctor_id;
+      visitTypeSelection = last.visit_type;
+      renderMain();
+      setTimeout(() => {
+        if (last.sample_id) document.getElementById("visit-sample-select").value = last.sample_id;
+        document.getElementById("visit-sample-qty").value = last.sample_qty;
+        document.getElementById("visit-notes-input").value = last.notes || "";
+      }, 20);
+      showToast("Pre-filled from your last visit.", "indigo");
+    }
+
+    function attemptSubmitVisit() {
+      const user = currentUser();
+      const doctorId = document.getElementById("visit-doctor-select").value;
+      const sampleId = document.getElementById("visit-sample-select").value || null;
+      const sampleQty = parseInt(document.getElementById("visit-sample-qty").value || "0", 10);
+      const visitDate = document.getElementById("visit-date-input").value || todayISO();
+      const notes = document.getElementById("visit-notes-input").value.trim();
+
+      if (!doctorId) return showToast("Please select an assigned doctor or pharmacy.", "amber");
+      if (sampleId && sampleQty > 0) {
+        const inv = appState.member_sample_inventory.find(i => i.member_id === user.id && i.sample_id === sampleId);
+        if (!inv || inv.stock < sampleQty) {
+          return showToast("Requested sample quantity exceeds your personal stock.", "rose");
+        }
+      }
+
+      const dayCount = appState.visits.filter(v => v.member_id === user.id && v.visit_date === visitDate).length;
+      const target = appState.schedule_rules.daily_target;
+
+      if (dayCount + 1 > target) {
+        openModal(`
+          <h3 class="text-base font-bold text-slate-900 mb-2">Daily Quota Exceeded (${dayCount + 1}/${target})</h3>
+          <p class="text-xs text-slate-600 mb-3">Logging this visit exceeds your daily baseline target of <strong>${target} visits</strong>. Send a Compensation / Variance Request to the Supervisor to continue.</p>
+          <div class="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 mb-3">
+            Warning: If the Supervisor rejects this variance request, affected visits on ${visitDate} will be highlighted in red.
+          </div>
+          <textarea id="over-quota-reason" rows="2" placeholder="Reason for extra visits (e.g., compensating for prior day)..." class="w-full rounded-xl border border-slate-300 p-2.5 text-xs mb-4"></textarea>
+          <div class="flex justify-end gap-2">
+            <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
+            <button onclick="confirmOverQuotaVisit('${doctorId}', '${sampleId || ""}', ${sampleQty}, '${visitDate}', ${JSON.stringify(notes)})" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white">Send Variance & Log Visit</button>
+          </div>
+        `);
+        return;
+      }
+
+      finalizeVisitSubmission({ doctorId, sampleId, sampleQty, visitDate, notes, varianceId: null });
+    }
+
+    async function confirmOverQuotaVisit(doctorId, sampleId, sampleQty, visitDate, notes) {
+      const user = currentUser();
+      const reason = document.getElementById("over-quota-reason").value.trim() || "Field compensation coverage";
+      const dayCount = appState.visits.filter(v => v.member_id === user.id && v.visit_date === visitDate).length + 1;
+      const variance = {
+        id: uid("var"),
+        member_id: user.id,
+        variance_date: visitDate,
+        variance_type: "over_quota",
+        visit_count: dayCount,
+        target_count: appState.schedule_rules.daily_target,
+        reason,
+        status: "Pending",
+        created_at: new Date().toISOString()
+      };
+      appState.quota_variances.unshift(variance);
+      if (isSupabaseConfigured && !simulatedOffline) {
+        const { data } = await sb.from("quota_variances").insert({
+          member_id: user.id,
+          variance_date: visitDate,
+          variance_type: "over_quota",
+          visit_count: dayCount,
+          target_count: appState.schedule_rules.daily_target,
+          reason
+        }).select().single();
+        if (data) variance.id = data.id;
+      }
+      await pushNotification(supervisorUser().id, "Quota Variances", `${user.full_name} requested >${appState.schedule_rules.daily_target}/day variance on ${visitDate}.`);
+      closeModal();
+      await finalizeVisitSubmission({
+        doctorId,
+        sampleId: sampleId || null,
+        sampleQty,
+        visitDate,
+        notes,
+        varianceId: variance.id
+      });
+    }
+
+    async function finalizeVisitSubmission({ doctorId, sampleId, sampleQty, visitDate, notes, varianceId }) {
+      const user = currentUser();
+      const tempId = uid("vis");
+
+      if (sampleId && sampleQty > 0) {
+        const inv = appState.member_sample_inventory.find(i => i.member_id === user.id && i.sample_id === sampleId);
+        if (inv) inv.stock -= sampleQty;
+      }
+
+      const visitObj = {
+        id: tempId,
+        client_temp_id: tempId,
+        member_id: user.id,
+        doctor_id: doctorId,
+        visit_type: visitTypeSelection,
+        sample_id: sampleId,
+        sample_qty: sampleId ? sampleQty : 0,
+        visit_date: visitDate,
+        notes,
+        variance_id: varianceId,
+        created_at: new Date().toISOString()
+      };
+      appState.visits.unshift(visitObj);
+
+      const rpcPayload = {
+        p_client_temp_id: tempId,
+        p_member_id: user.id,
+        p_doctor_id: doctorId,
+        p_visit_type: visitTypeSelection,
+        p_sample_id: sampleId,
+        p_sample_qty: sampleId ? sampleQty : 0,
+        p_visit_date: visitDate,
+        p_notes: notes,
+        p_variance_id: varianceId
+      };
+
+      if (simulatedOffline || !navigator.onLine) {
+        queueOfflineAction({ type: "visit", label: `Visit logged (${visitDate})`, payload: rpcPayload });
+      } else if (isSupabaseConfigured) {
+        const { error } = await sb.rpc("log_visit_atomic", rpcPayload);
+        if (error) showToast(error.message, "rose");
+      }
+
+      saveLocalState();
+      renderMain();
+      showToast("Field visit logged successfully.", "emerald");
+    }
+
+    function openEditVisitModal(visitId) {
+      const v = appState.visits.find(x => x.id === visitId);
+      if (!v) return;
+      openModal(`
+        <h3 class="text-base font-bold text-slate-900 mb-3">Edit Recent Visit</h3>
+        <div class="space-y-3 text-xs">
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">Visit Type</label>
+            <select id="edit-vis-type" class="w-full rounded-xl border border-slate-300 px-3 py-2">
+              <option value="Physician Visit" ${v.visit_type === "Physician Visit" ? "selected" : ""}>Physician Visit</option>
+              <option value="Pharmacy Visit" ${v.visit_type === "Pharmacy Visit" ? "selected" : ""}>Pharmacy Visit</option>
+            </select>
+          </div>
+          <div>
+            <label class="block font-semibold text-slate-700 mb-1">Notes</label>
+            <textarea id="edit-vis-notes" rows="3" class="w-full rounded-xl border border-slate-300 p-2.5">${v.notes || ""}</textarea>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+          <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
+          <button onclick="saveEditedVisit('${v.id}')" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white">Save Changes</button>
+        </div>
+      `);
+    }
+
+    async function saveEditedVisit(visitId) {
+      const v = appState.visits.find(x => x.id === visitId);
+      if (!v) return;
+      v.visit_type = document.getElementById("edit-vis-type").value;
+      v.notes = document.getElementById("edit-vis-notes").value.trim();
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("visits").update({ visit_type: v.visit_type, notes: v.notes }).eq("id", visitId);
+      }
+      saveLocalState();
+      closeModal();
+      renderMain();
+      showToast("Visit updated.", "emerald");
+    }
+
+    // Tab 2: My Quota & Stats
+    function renderMemberStatsTab() {
+      const user = currentUser();
+      const rules = appState.schedule_rules;
+      const m = getMemberMetrics(user.id);
+      const remWeekly = Math.max(0, rules.weekly_target - m.weekly);
+      const activeSamples = appState.samples.filter(s => s.is_active);
+      const myGifts = appState.gift_requests.filter(g => g.member_id === user.id);
+      const myDays = appState.day_off_requests.filter(d => d.member_id === user.id);
+
+      return `
+        <div class="space-y-6">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 class="text-base font-bold text-slate-900">Personal Quota & Performance</h2>
+              <p class="text-xs text-slate-500">Private visit metrics and sample utilization</p>
+            </div>
+            <button onclick="openUnderQuotaModal()" class="px-3.5 py-2 rounded-xl text-xs font-semibold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300">Request &lt;${rules.daily_target}/Day Variance</button>
+          </div>
+
+          <div class="grid grid-cols-2 sm:grid-cols-5 gap-4 tabular-nums">
+            ${[
+              ["Daily Visits", `${m.daily} / ${rules.daily_target}`],
+              ["Weekly Visits", `${m.weekly} / ${rules.weekly_target}`],
+              ["Remaining Weekly", remWeekly],
+              ["Monthly Visits", m.monthly],
+              ["Annual Visits", m.annual]
+            ].map(([label, val]) => `
+              <div class="bg-white rounded-2xl border border-slate-200 p-4">
+                <p class="text-xs text-slate-500 font-medium">${label}</p>
+                <p class="text-xl font-bold text-slate-900 mt-1">${val}</p>
+              </div>
+            `).join("")}
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="bg-white rounded-2xl border border-slate-200 p-5">
+              <h3 class="text-sm font-bold text-slate-900 mb-3">Samples Used vs. Remaining Stock</h3>
+              <table class="w-full text-left text-xs tabular-nums">
+                <thead><tr class="border-b border-slate-200 text-slate-500"><th class="py-2">Sample</th><th class="py-2">Used</th><th class="py-2">Remaining</th><th class="py-2">Status</th></tr></thead>
+                <tbody class="divide-y divide-slate-100">
+                  ${activeSamples.map(s => {
+                    const used = m.myVisits.filter(v => v.sample_id === s.id).reduce((a, b) => a + (b.sample_qty || 0), 0);
+                    const inv = appState.member_sample_inventory.find(i => i.member_id === user.id && i.sample_id === s.id);
+                    const rem = inv ? inv.stock : 0;
+                    const low = rem <= 6;
+                    return `
+                      <tr>
+                        <td class="py-2.5 font-semibold text-slate-900">${s.name}</td>
+                        <td class="py-2.5">${used} ${s.unit}</td>
+                        <td class="py-2.5 font-bold">${rem} ${s.unit}</td>
+                        <td class="py-2.5">${low ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700">Low Stock</span>` : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700">Healthy</span>`}</td>
+                      </tr>
+                    `;
+                  }).join("")}
+                </tbody>
+              </table>
+            </div>
+
+            <div class="bg-white rounded-2xl border border-slate-200 p-5">
+              <h3 class="text-sm font-bold text-slate-900 mb-3">My Gift & Day-Off Requests Summary</h3>
+              <div class="space-y-2 text-xs">
+                ${myGifts.map(g => `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 flex justify-between"><span>Gift: <strong>${g.gift_details}</strong></span><span class="font-semibold text-indigo-700">${g.status}</span></div>`).join("")}
+                ${myDays.map(d => `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 flex justify-between tabular-nums"><span>Day Off: <strong>${d.requested_date}</strong></span><span class="font-semibold text-amber-700">${d.status}</span></div>`).join("")}
+                ${myGifts.length + myDays.length === 0 ? `<p class="text-slate-500 py-6 text-center">No requests submitted yet.</p>` : ""}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function openUnderQuotaModal() {
+      const rules = appState.schedule_rules;
+      openModal(`
+        <h3 class="text-base font-bold text-slate-900 mb-2">Request &lt;${rules.daily_target}/Day Variance</h3>
+        <p class="text-xs text-slate-600 mb-3">Explain why daily visits finished below the ${rules.daily_target}-visit target.</p>
+        <input id="under-var-date" type="date" value="${todayISO()}" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs mb-3 tabular-nums" />
+        <textarea id="under-var-reason" rows="3" placeholder="Reason (e.g., clinic closures, travel delay)..." class="w-full rounded-xl border border-slate-300 p-2.5 text-xs mb-4"></textarea>
+        <div class="flex justify-end gap-2">
+          <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
+          <button onclick="submitUnderQuotaVariance()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white">Submit Request</button>
+        </div>
+      `);
+    }
+
+    async function submitUnderQuotaVariance() {
+      const user = currentUser();
+      const date = document.getElementById("under-var-date").value || todayISO();
+      const reason = document.getElementById("under-var-reason").value.trim();
+      if (!reason) return showToast("Enter a reason.", "amber");
+      const count = appState.visits.filter(v => v.member_id === user.id && v.visit_date === date).length;
+      const item = {
+        id: uid("var"),
+        member_id: user.id,
+        variance_date: date,
+        variance_type: "under_quota",
+        visit_count: count,
+        target_count: appState.schedule_rules.daily_target,
+        reason,
+        status: "Pending",
+        created_at: new Date().toISOString()
+      };
+      appState.quota_variances.unshift(item);
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("quota_variances").insert({
+          member_id: user.id, variance_date: date, variance_type: "under_quota",
+          visit_count: count, target_count: appState.schedule_rules.daily_target, reason
+        });
+      }
+      await pushNotification(supervisorUser().id, "Quota Variances", `${user.full_name} submitted a <${appState.schedule_rules.daily_target}/day variance for ${date}.`);
+      saveLocalState();
+      closeModal();
+      showToast("Variance request sent to Supervisor.", "emerald");
+    }
+
+    // Tab 3: Plans & Actuals
+    function renderMemberPlansTab() {
+      const user = currentUser();
+      const assignedDocs = assignedDoctorsFor(user.id);
+      const activeSamples = appState.samples.filter(s => s.is_active);
+      const myPlans = appState.plans.filter(p => p.member_id === user.id);
+      const visitedDocIds = new Set(appState.visits.filter(v => v.member_id === user.id).map(v => v.doctor_id));
+
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div class="bg-white rounded-2xl border border-slate-200 p-5 h-fit">
+            <div class="flex items-center justify-between mb-4">
+              <h2 class="text-base font-bold text-slate-900">Create Plan</h2>
+              ${myPlans.length > 0 ? `<button onclick="duplicateLastPlan()" class="text-xs font-semibold px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800">Duplicate Last Plan</button>` : ""}
+            </div>
+            <div class="space-y-3 text-xs">
+              <div>
+                <label class="block font-semibold text-slate-700 mb-1">Plan Name</label>
+                <input id="plan-name" type="text" placeholder="e.g., Week 5 Territory Route" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block font-semibold text-slate-700 mb-1">Plan Type</label>
+                  <select id="plan-type" class="w-full rounded-xl border border-slate-300 px-3 py-2">
+                    <option value="Weekly">Weekly</option>
+                    <option value="Monthly">Monthly</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block font-semibold text-slate-700 mb-1">Expected Field Entry</label>
+                  <input id="plan-entry-time" type="time" value="08:30" class="w-full rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
+                </div>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-700 mb-1">Target Doctors to Visit</label>
+                <div class="max-h-36 overflow-y-auto border border-slate-200 rounded-xl p-2 space-y-1">
+                  ${assignedDocs.map(d => `
+                    <label class="flex items-center gap-2 p-1 hover:bg-slate-50 rounded-lg cursor-pointer">
+                      <input type="checkbox" class="plan-doc-cb" value="${d.id}" />
+                      <span>${d.name} <span class="text-slate-400">(${d.specialty})</span></span>
+                    </label>
+                  `).join("")}
+                </div>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-700 mb-1">Planned Samples to Give (Optional)</label>
+                <div class="space-y-1.5">
+                  ${activeSamples.map(s => `
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-slate-700">${s.name}</span>
+                      <input type="number" min="0" placeholder="0" data-plan-sample="${s.id}" class="w-20 rounded-lg border border-slate-300 px-2 py-1 text-right tabular-nums" />
+                    </div>
+                  `).join("")}
+                </div>
+              </div>
+              <button onclick="saveNewPlan()" class="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold">Save Plan</button>
+            </div>
+          </div>
+
+          <div class="lg:col-span-2 space-y-4">
+            <h2 class="text-base font-bold text-slate-900">Saved Plans & Plan vs. Actual Comparison</h2>
+            ${myPlans.length === 0
+              ? `<div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-xs text-slate-500">No plans created yet.</div>`
+              : myPlans.map(p => {
+                const targetIds = p.target_doctor_ids || [];
+                const completedCount = targetIds.filter(id => visitedDocIds.has(id)).length;
+                const rolloverIds = targetIds.filter(id => !visitedDocIds.has(id));
+                const rolloverNames = rolloverIds.map(id => appState.doctors.find(d => d.id === id)?.name || id);
+                const totalOfficeSamples = Object.values(p.planned_samples || {}).reduce((a, b) => a + Number(b || 0), 0);
+
+                return `
+                  <div class="bg-white rounded-2xl border border-slate-200 p-5">
+                    <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                      <div>
+                        <span class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 mr-2">${p.plan_type}</span>
+                        <span class="text-sm font-bold text-slate-900">${p.plan_name}</span>
+                      </div>
+                      <span class="text-xs text-slate-500 tabular-nums">Expected Entry: <strong>${p.expected_entry_time}</strong></span>
+                    </div>
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3 tabular-nums">
+                      <div class="p-3 rounded-xl bg-slate-50 border border-slate-200"><p class="text-[11px] text-slate-500">Planned Doctors</p><p class="text-lg font-bold">${targetIds.length}</p></div>
+                      <div class="p-3 rounded-xl bg-emerald-50 border border-emerald-200"><p class="text-[11px] text-emerald-700">Completed Match</p><p class="text-lg font-bold text-emerald-800">${completedCount}</p></div>
+                      <div class="p-3 rounded-xl bg-amber-50 border border-amber-200"><p class="text-[11px] text-amber-800">Rollover / Remaining</p><p class="text-lg font-bold text-amber-900">${rolloverIds.length}</p></div>
+                      <div class="p-3 rounded-xl bg-slate-50 border border-slate-200"><p class="text-[11px] text-slate-500">Planned Office Samples</p><p class="text-lg font-bold">${totalOfficeSamples}</p></div>
+                    </div>
+                    <p class="text-xs text-slate-600"><strong>Rollover Doctors:</strong> ${rolloverNames.length ? rolloverNames.join(", ") : "All planned doctors visited!"}</p>
+                  </div>
+                `;
+              }).join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    async function saveNewPlan() {
+      const user = currentUser();
+      const plan_name = document.getElementById("plan-name").value.trim();
+      const plan_type = document.getElementById("plan-type").value;
+      const expected_entry_time = document.getElementById("plan-entry-time").value || "08:30";
+      const target_doctor_ids = Array.from(document.querySelectorAll(".plan-doc-cb:checked")).map(cb => cb.value);
+      const planned_samples = {};
+      document.querySelectorAll("[data-plan-sample]").forEach(inp => {
+        const val = parseInt(inp.value || "0", 10);
+        if (val > 0) planned_samples[inp.getAttribute("data-plan-sample")] = val;
+      });
+      if (!plan_name) return showToast("Enter a plan name.", "amber");
+
+      const item = {
+        id: uid("plan"), member_id: user.id, plan_name, plan_type,
+        expected_entry_time, target_doctor_ids, planned_samples,
+        created_at: new Date().toISOString()
+      };
+      appState.plans.unshift(item);
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("plans").insert({
+          member_id: user.id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples
+        });
+      }
+      saveLocalState();
+      renderMain();
+      showToast("Plan saved.", "emerald");
+    }
+
+    async function duplicateLastPlan() {
+      const user = currentUser();
+      const last = appState.plans.find(p => p.member_id === user.id);
+      if (!last) return;
+      const copy = {
+        ...last,
+        id: uid("plan"),
+        plan_name: `${last.plan_name} (Copy)`,
+        created_at: new Date().toISOString()
+      };
+      appState.plans.unshift(copy);
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("plans").insert({
+          member_id: user.id,
+          plan_name: copy.plan_name,
+          plan_type: copy.plan_type,
+          expected_entry_time: copy.expected_entry_time,
+          target_doctor_ids: copy.target_doctor_ids,
+          planned_samples: copy.planned_samples
+        });
+      }
+      saveLocalState();
+      renderMain();
+      showToast("Duplicated last plan.", "indigo");
+    }
+
+    // Tab 4: Samples & Inventory
+    function renderMemberSamplesTab() {
+      const user = currentUser();
+      const activeSamples = appState.samples.filter(s => s.is_active);
+      const metrics = getMemberMetrics(user.id);
+      const remVisitsToday = Math.max(0, appState.schedule_rules.daily_target - metrics.daily);
+
+      const lowItems = activeSamples.filter(s => {
+        const inv = appState.member_sample_inventory.find(i => i.member_id === user.id && i.sample_id === s.id);
+        return (inv ? inv.stock : 0) <= 6;
+      });
+
+      return `
+        <div class="space-y-6">
+          ${lowItems.length > 0 ? `
+            <div class="p-4 rounded-2xl bg-rose-50 border border-rose-300 text-rose-900 text-xs font-semibold">
+              Low-Stock Warning: ${lowItems.map(s => s.name).join(", ")} at or below 6 units. Request restock from the office.
+            </div>
+          ` : ""}
+
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div class="bg-white rounded-2xl border border-slate-200 p-5 h-fit">
+              <h2 class="text-base font-bold text-slate-900 mb-3">Take Samples From Office</h2>
+              <div class="space-y-3 text-xs">
+                <div>
+                  <label class="block font-semibold text-slate-700 mb-1">Sample Item</label>
+                  <select id="pickup-sample-id" class="w-full rounded-xl border border-slate-300 px-3 py-2 bg-white">
+                    ${activeSamples.map(s => `<option value="${s.id}">${s.name} (${s.unit})</option>`).join("")}
+                  </select>
+                </div>
+                <div>
+                  <label class="block font-semibold text-slate-700 mb-1">Quantity Taken</label>
+                  <input id="pickup-qty" type="number" min="1" value="10" class="w-full rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
+                </div>
+                <div>
+                  <label class="block font-semibold text-slate-700 mb-1">Pickup Note</label>
+                  <input id="pickup-note" type="text" placeholder="e.g., Weekly branch restock" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+                </div>
+                <button onclick="takeSamplesFromOffice()" class="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold">Record Office Pickup</button>
+              </div>
+            </div>
+
+            <div class="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-5">
+              <h2 class="text-base font-bold text-slate-900 mb-1">My Inventory & "After Complete Day Visits" Projection</h2>
+              <p class="text-xs text-slate-500 mb-4 tabular-nums">Projects remaining stock after completing your remaining ${remVisitsToday} visit(s) today.</p>
+              <table class="w-full text-left text-xs tabular-nums">
+                <thead>
+                  <tr class="border-b border-slate-200 text-slate-500">
+                    <th class="py-2">Sample</th>
+                    <th class="py-2">Category</th>
+                    <th class="py-2">Current Now</th>
+                    <th class="py-2">After Complete Day</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                  ${activeSamples.map(s => {
+                    const inv = appState.member_sample_inventory.find(i => i.member_id === user.id && i.sample_id === s.id);
+                    const cur = inv ? inv.stock : 0;
+                    const projected = Math.max(0, cur - remVisitsToday);
+                    return `
+                      <tr>
+                        <td class="py-3 font-semibold text-slate-900">${s.name}</td>
+                        <td class="py-3 text-slate-500">${s.category}</td>
+                        <td class="py-3 font-bold ${cur <= 6 ? "text-rose-600" : "text-slate-900"}">${cur} ${s.unit}</td>
+                        <td class="py-3 font-semibold text-indigo-700">${projected} ${s.unit}</td>
+                      </tr>
+                    `;
+                  }).join("")}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function takeSamplesFromOffice() {
+      const user = currentUser();
+      const sampleId = document.getElementById("pickup-sample-id").value;
+      const qty = parseInt(document.getElementById("pickup-qty").value || "0", 10);
+      const note = document.getElementById("pickup-note").value.trim();
+      if (!sampleId || qty <= 0) return showToast("Enter a valid quantity.", "amber");
+
+      let inv = appState.member_sample_inventory.find(i => i.member_id === user.id && i.sample_id === sampleId);
+      if (!inv) {
+        inv = { member_id: user.id, sample_id: sampleId, stock: 0 };
+        appState.member_sample_inventory.push(inv);
+      }
+      inv.stock += qty;
+
+      const smp = appState.samples.find(s => s.id === sampleId);
+      if (smp) smp.office_total_taken += qty;
+
+      appState.sample_pickups.unshift({
+        id: uid("pick"), member_id: user.id, sample_id: sampleId, quantity: qty, note, created_at: new Date().toISOString()
+      });
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.rpc("take_samples_from_office", {
+          p_member_id: user.id, p_sample_id: sampleId, p_qty: qty, p_note: note
+        });
+      }
+
+      await pushNotification(supervisorUser().id, "Field Rounds", `${user.full_name} took ${qty} ${smp?.unit || "units"} of ${smp?.name} from office.`);
+      saveLocalState();
+      renderMain();
+      showToast("Office sample pickup recorded.", "emerald");
+    }
+
+    // Tab 5: Gifts & Day-Off
+    function renderMemberGiftsDayOffTab() {
+      const user = currentUser();
+      const myGifts = appState.gift_requests.filter(g => g.member_id === user.id);
+      const myDays = appState.day_off_requests.filter(d => d.member_id === user.id);
+
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Gift Request -->
+          <div class="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
+            <h2 class="text-base font-bold text-slate-900">Request a Gift</h2>
+            <div class="space-y-3 text-xs">
+              <input id="gift-details" type="text" placeholder="Gift Details (e.g., Clinic Desk Organizer)" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+              <div class="grid grid-cols-2 gap-2">
+                <input id="gift-price" type="number" min="0" placeholder="Estimated Price ($)" class="rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
+                <select id="gift-buyer" class="rounded-xl border border-slate-300 px-3 py-2">
+                  <option value="Member">Who Buys It? Member (Me)</option>
+                  <option value="Team Supervisor">Who Buys It? Team Supervisor</option>
+                </select>
+              </div>
+              <input id="gift-reason" type="text" placeholder="Reason Note (Doctor / Clinic justification)" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+              <button onclick="submitGiftRequest()" class="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-semibold">Submit Gift Request</button>
+            </div>
+            <div class="space-y-2 pt-3 border-t border-slate-100">
+              ${myGifts.map(g => `
+                <div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs">
+                  <div class="flex justify-between font-bold">
+                    <span>${g.gift_details} ($${g.estimated_price})</span>
+                    <span class="text-indigo-700">${g.status}</span>
+                  </div>
+                  <p class="text-slate-500 mt-1">Buyer: ${g.buyer_role} · ${g.reason || ""}</p>
+                  ${g.status === "Approved" ? (
+                    g.buyer_role === "Member"
+                      ? `<button onclick="markGiftBought('${g.id}')" class="mt-2 px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold">Mark Bought / Done</button>`
+                      : `<p class="mt-2 text-[11px] font-semibold text-amber-800">Only Team Supervisor can mark Bought / Done</p>`
+                  ) : ""}
+                </div>
+              `).join("")}
+            </div>
+          </div>
+
+          <!-- Day Off Request -->
+          <div class="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
+            <h2 class="text-base font-bold text-slate-900">Request a Day Off</h2>
+            <div class="space-y-3 text-xs">
+              <input id="dayoff-date" type="date" value="${todayISO()}" class="w-full rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
+              <input id="dayoff-reason" type="text" placeholder="Reason Note" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+              <button onclick="submitDayOffRequest()" class="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-semibold">Submit Day-Off Request</button>
+            </div>
+            <div class="space-y-2 pt-3 border-t border-slate-100">
+              ${myDays.map(d => `
+                <div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs flex items-center justify-between">
+                  <div>
+                    <p class="font-bold tabular-nums">${d.requested_date}</p>
+                    <p class="text-slate-500">${d.reason || ""}</p>
+                  </div>
+                  <span class="px-2.5 py-1 rounded-full font-semibold bg-amber-50 text-amber-800 border border-amber-200">${d.status}</span>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function submitGiftRequest() {
+      const user = currentUser();
+      const gift_details = document.getElementById("gift-details").value.trim();
+      const estimated_price = parseFloat(document.getElementById("gift-price").value || "0");
+      const buyer_role = document.getElementById("gift-buyer").value;
+      const reason = document.getElementById("gift-reason").value.trim();
+      if (!gift_details) return showToast("Enter gift details.", "amber");
+
+      const item = {
+        id: uid("gift"), member_id: user.id, gift_details, estimated_price,
+        buyer_role, reason, status: "Pending", created_at: new Date().toISOString()
+      };
+      appState.gift_requests.unshift(item);
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("gift_requests").insert({
+          member_id: user.id, gift_details, estimated_price, buyer_role, reason
+        });
+      }
+      await pushNotification(supervisorUser().id, "Gifts & Day-Off", `${user.full_name} requested a gift: ${gift_details} ($${estimated_price}).`);
+      saveLocalState();
+      renderMain();
+      showToast("Gift request submitted.", "emerald");
+    }
+
+    async function markGiftBought(giftId) {
+      const g = appState.gift_requests.find(x => x.id === giftId);
+      if (!g) return;
+      g.status = "Bought / Done";
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("gift_requests").update({ status: "Bought / Done" }).eq("id", giftId);
+      }
+      const targetRecipient = currentUser().role === "supervisor" ? g.member_id : supervisorUser().id;
+      await pushNotification(targetRecipient, "Gifts & Day-Off", `Gift Done & Implemented: ${g.gift_details}.`);
+      saveLocalState();
+      renderMain();
+      showToast("Gift marked Bought / Done.", "emerald");
+    }
+
+    async function submitDayOffRequest() {
+      const user = currentUser();
+      const requested_date = document.getElementById("dayoff-date").value;
+      const reason = document.getElementById("dayoff-reason").value.trim();
+      if (!requested_date) return showToast("Select a date.", "amber");
+
+      const item = {
+        id: uid("day"), member_id: user.id, requested_date, reason, status: "Pending", created_at: new Date().toISOString()
+      };
+      appState.day_off_requests.unshift(item);
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await sb.from("day_off_requests").insert({ member_id: user.id, requested_date, reason });
+      }
+      await pushNotification(supervisorUser().id, "Gifts & Day-Off", `${user.full_name} requested day off on ${requested_date}.`);
+      saveLocalState();
+      renderMain();
+      showToast("Day-off request submitted.", "emerald");
+    }
+
+    // =========================================================
+    // 9. SUPERVISOR / ADMIN VIEWS (5 TABS)
+    // =========================================================
+    function renderSupLiveBoard() {
+      const today = todayISO();
+      const rules = appState.schedule_rules;
+      const reps = appState.profiles.filter(p => p.role === "member");
+      const todayVisits = appState.visits.filter(v => v.visit_date === today);
+      const inFieldCount = reps.filter(r => r.live_status === "In the Field").length;
+      const totalOfficeSamples = appState.samples.reduce((a, b) => a + (b.office_total_taken || 0), 0);
+      const totalGivenSamples = appState.visits.reduce((a, b) => a + (b.sample_qty || 0), 0);
+
+      const statusBadge = {
+        "Inactive Yet": "bg-slate-100 text-slate-600",
+        "Getting Ready": "bg-amber-100 text-amber-800",
+        "In the Field": "bg-emerald-100 text-emerald-800",
+        "Meeting Day": "bg-indigo-100 text-indigo-800",
+        "Finished Field": "bg-slate-200 text-slate-800"
+      };
+
+      return `
+        <div class="space-y-6">
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 tabular-nums">
+            <div class="bg-white rounded-2xl border border-slate-200 p-4"><p class="text-xs text-slate-500">Visits Logged Today</p><p class="text-2xl font-bold text-slate-900 mt-1">${todayVisits.length}</p></div>
+            <div class="bg-white rounded-2xl border border-slate-200 p-4"><p class="text-xs text-slate-500">In the Field Right Now</p><p class="text-2xl font-bold text-emerald-600 mt-1">${inFieldCount} / ${reps.length}</p></div>
+            <div class="bg-white rounded-2xl border border-slate-200 p-4"><p class="text-xs text-slate-500">Total Samples Taken (Office)</p><p class="text-2xl font-bold text-indigo-600 mt-1">${totalOfficeSamples}</p></div>
+            <div class="bg-white rounded-2xl border border-slate-200 p-4"><p class="text-xs text-slate-500">Total Samples Given in Visits</p><p class="text-2xl font-bold text-slate-900 mt-1">${totalGivenSamples}</p></div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div class="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-5 overflow-x-auto">
+              <h2 class="text-base font-bold text-slate-900 mb-3">Live Team Board ("Who's Where Right Now")</h2>
+              <table class="w-full text-left text-xs tabular-nums">
+                <thead>
+                  <tr class="border-b border-slate-200 text-slate-500">
+                    <th class="py-2">Member</th>
+                    <th class="py-2">Region</th>
+                    <th class="py-2">Today Visits</th>
+                    <th class="py-2">Live Status</th>
+                    <th class="py-2">Round Timer</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100">
+                  ${reps.map(r => {
+                    const cnt = todayVisits.filter(v => v.member_id === r.id).length;
+                    const sec = r.live_status === "In the Field" && r.active_round_started_at
+                      ? (Date.now() - new Date(r.active_round_started_at).getTime()) / 1000
+                      : (r.last_round_duration_sec || 0);
+                    return `
+                      <tr>
+                        <td class="py-2.5 font-semibold text-slate-900">${r.full_name}</td>
+                        <td class="py-2.5 text-slate-600">${r.region}</td>
+                        <td class="py-2.5 font-bold">${cnt} / ${rules.daily_target}</td>
+                        <td class="py-2.5"><span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${statusBadge[r.live_status] || statusBadge["Inactive Yet"]}">${r.live_status}</span></td>
+                        <td class="py-2.5 font-semibold" ${r.live_status === "In the Field" && r.active_round_started_at ? `data-live-start="${r.active_round_started_at}"` : ""}>${formatDuration(sec)}</td>
+                      </tr>
+                    `;
+                  }).join("")}
+                </tbody>
+              </table>
+            </div>
+
+            <div class="bg-white rounded-2xl border border-slate-200 p-5">
+              <h2 class="text-base font-bold text-slate-900 mb-3">All Visit Details & Samples Feed</h2>
+              <div class="space-y-3 max-h-[640px] overflow-y-auto">
+                ${appState.visits.map(v => {
+                  const rep = appState.profiles.find(p => p.id === v.member_id)?.full_name || "";
+                  const doc = appState.doctors.find(d => d.id === v.doctor_id);
+                  const smp = appState.samples.find(s => s.id === v.sample_id);
+                  const variance = v.variance_id ? appState.quota_variances.find(q => q.id === v.variance_id) : null;
+                  const rejected = variance && variance.status === "Rejected";
+
+                  return `
+                    <div class="p-3 rounded-xl border text-xs ${rejected ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50"}">
+                      <div class="flex justify-between font-bold text-slate-900">
+                        <span>${rep}</span>
+                        <span class="text-slate-500 font-normal tabular-nums">${v.visit_date}</span>
+                      </div>
+                      <p class="text-indigo-700 font-semibold mt-0.5">${doc?.name || ""} (${doc?.location || ""}) · ${v.visit_type}</p>
+                      <p class="text-slate-700 mt-1 tabular-nums">${smp && v.sample_qty > 0 ? `${v.sample_qty} ${smp.unit} ${smp.name}` : "No samples"}</p>
+                      ${v.notes ? `<p class="text-slate-500 mt-1">${v.notes}</p>` : ""}
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // Supervisor Tab 2: Doctors, Samples & Bulk Assign
+    let bulkTargetRepId = "";
+    let bulkFilterLoc = "ALL";
+    let bulkFilterSpec = "ALL";
+
+    function renderSupCatalogAndAssign() {
+      const reps = appState.profiles.filter(p => p.role === "member");
+      if (!bulkTargetRepId && reps[0]) bulkTargetRepId = reps[0].id;
+      const specialties = [...new Set(appState.doctors.map(d => d.specialty))];
+      const assignedSet = new Set(appState.doctor_assignments.filter(a => a.member_id === bulkTargetRepId).map(a => a.doctor_id));
+
+      const filteredDoctors = appState.doctors.filter(d =>
+        d.is_active &&
+        (bulkFilterLoc === "ALL" || d.location === bulkFilterLoc) &&
+        (bulkFilterSpec === "ALL" || d.specialty === bulkFilterSpec)
+      );
+
+      return `
+        <div class="space-y-6">
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Master Doctors Manager -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-5">
+              <h2 class="text-base font-bold text-slate-900 mb-3">Master Doctors List (Add, Edit & Archive)</h2>
+              <div class="grid grid-cols-2 gap-2 mb-3 text-xs">
+                <input id="new-doc-name" type="text" placeholder="Doctor / Pharmacy Name" class="rounded-xl border border-slate-300 px-3 py-2" />
+                <input id="new-doc-spec" type="text" placeholder="Specialty (e.g., Cardiology)" class="rounded-xl border border-slate-300 px-3 py-2" />
+                <select id="new-doc-loc" class="rounded-xl border border-slate-300 px-3 py-2">
+                  ${REGIONS.map(r => `<option value="${r}">${r}</option>`).join("")}
+                </select>
+                <input id="new-doc-tier" type="text" placeholder="Tier / Clinic" class="rounded-xl border border-slate-300 px-3 py-2" />
+              </div>
+              <button onclick="addMasterDoctor()" class="w-full py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold mb-4">+ Add Doctor</button>
+              <div class="max-h-72 overflow-y-auto divide-y divide-slate-100 text-xs">
+                ${appState.doctors.map(d => `
+                  <div class="py-2.5 flex items-center justify-between gap-2 ${d.is_active ? "" : "opacity-50"}">
+                    <div>
+                      <p class="font-bold text-slate-900">${d.name} ${!d.is_active ? "(Archived)" : ""}</p>
+                      <p class="text-slate-500">${d.specialty} · ${d.location} · ${d.tier_clinic}</p>
+                    </div>
+                    <div class="flex gap-2">
+                      <button onclick="openEditDoctorModal('${d.id}')" class="text-indigo-600 hover:underline font-semibold">Edit</button>
+                      <button onclick="toggleDoctorActive('${d.id}')" class="text-rose-600 hover:underline font-semibold">${d.is_active ? "Archive" : "Restore"}</button>
+                    </div>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+
+            <!-- Master Samples Manager -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-5">
+              <h2 class="text-base font-bold text-slate-900 mb-3">Master Samples & Office Totals</h2>
+              <div class="grid grid-cols-3 gap-2 mb-3 text-xs">
+                <input id="new-smp-name" type="text" placeholder="Sample Name" class="rounded-xl border border-slate-300 px-3 py-2" />
+                <input id="new-smp-unit" type="text" placeholder="Unit (Packs)" class="rounded-xl border border-slate-300 px-3 py-2" />
+                <input id="new-smp-cat" type="text" placeholder="Category" class="rounded-xl border border-slate-300 px-3 py-2" />
+              </div>
+              <button onclick="addMasterSample()" class="w-full py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold mb-4">+ Add Sample Item</button>
+              <div class="max-h-72 overflow-y-auto divide-y divide-slate-100 text-xs tabular-nums">
+                ${appState.samples.map(s => `
+                  <div class="py-2.5 flex items-center justify-between gap-2 ${s.is_active ? "" : "opacity-50"}">
+                    <div>
+                      <p class="font-bold text-slate-900">${s.name} (${s.unit})</p>
+                      <p class="text-slate-500">${s.category} · Taken from Office: <strong>${s.office_total_taken}</strong></p>
+                    </div>
+                    <div class="flex gap-2">
+                      <button onclick="openEditSampleModal('${s.id}')" class="text-indigo-600 hover:underline font-semibold">Edit</button>
+                      <button onclick="toggleSampleActive('${s.id}')" class="text-rose-600 hover:underline font-semibold">${s.is_active ? "Archive" : "Restore"}</button>
+                    </div>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+          </div>
+
+          <!-- Bulk Doctor Assignment Tool -->
+          <div class="bg-white rounded-2xl border border-slate-200 p-5">
+            <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <h2 class="text-base font-bold text-slate-900">Bulk Doctor Assignment Tool</h2>
+              <div class="flex flex-wrap items-center gap-2 text-xs">
+                <select onchange="bulkTargetRepId=this.value; renderMain();" class="rounded-xl border border-slate-300 px-3 py-1.5 font-semibold">
+                  ${reps.map(r => `<option value="${r.id}" ${r.id === bulkTargetRepId ? "selected" : ""}>Target Rep: ${r.full_name} (${r.region})</option>`).join("")}
+                </select>
+                <select onchange="bulkFilterLoc=this.value; renderMain();" class="rounded-xl border border-slate-300 px-3 py-1.5">
+                  <option value="ALL">All Locations</option>
+                  ${REGIONS.map(r => `<option value="${r}" ${r === bulkFilterLoc ? "selected" : ""}>${r}</option>`).join("")}
+                </select>
+                <select onchange="bulkFilterSpec=this.value; renderMain();" class="rounded-xl border border-slate-300 px-3 py-1.5">
+                  <option value="ALL">All Specialties</option>
+                  ${specialties.map(sp => `<option value="${sp}" ${sp === bulkFilterSpec ? "selected" : ""}>${sp}</option>`).join("")}
+                </select>
+                <button type="button" onclick="toggleBulkCheckboxes(true)" class="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold">Select Filtered</button>
+                <button type="button" onclick="toggleBulkCheckboxes(false)" class="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold">Clear Filtered</button>
+              </div>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 mb-4 max-h-60 overflow-y-auto">
+              ${filteredDoctors.map(d => `
+                <label class="flex items-center gap-2 p-2.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs cursor-pointer">
+                  <input type="checkbox" class="bulk-doc-cb" value="${d.id}" ${assignedSet.has(d.id) ? "checked" : ""} />
+                  <span><strong>${d.name}</strong><br/><span class="text-slate-500">${d.specialty} · ${d.location}</span></span>
+                </label>
+              `).join("")}
+            </div>
+            <button onclick="saveBulkAssignments()" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold">Save Bulk Assignments</button>
+          </div>
+        </div>
+      `;
+    }
+
+    async function addMasterDoctor() {
+      const name = document.getElementById("new-doc-name").value.trim();
+      const specialty = document.getElementById("new-doc-spec").value.trim();
+      const location = document.getElementById("new-doc-loc").value;
+      const tier_clinic = document.getElementById("new-doc-tier").value.trim() || "Tier A";
+      if (!name || !specialty) return showToast("Enter doctor name and specialty.", "amber");
+
+      const item = { id: uid("doc"), name, specialty, location, tier_clinic, is_active: true };
+      if (isSupabaseConfigured) {
+        const { data } = await sb.from("doctors").insert({ name, specialty, location, tier_clinic }).select().single();
+        if (data) item.id = data.id;
+      }
+      appState.doctors.unshift(item);
+      saveLocalState();
+      renderMain();
+      showToast("Doctor added to master catalog.", "emerald");
+    }
+
+    function openEditDoctorModal(docId) {
+      const d = appState.doctors.find(x => x.id === docId);
+      if (!d) return;
+      openModal(`
+        <h3 class="text-base font-bold text-slate-900 mb-3">Edit Master Doctor</h3>
+        <div class="space-y-2.5 text-xs">
+          <input id="ed-doc-name" type="text" value="${d.name}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <input id="ed-doc-spec" type="text" value="${d.specialty}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <select id="ed-doc-loc" class="w-full rounded-xl border border-slate-300 px-3 py-2">
+            ${REGIONS.map(r => `<option value="${r}" ${r === d.location ? "selected" : ""}>${r}</option>`).join("")}
+          </select>
+          <input id="ed-doc-tier" type="text" value="${d.tier_clinic}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+          <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
+          <button onclick="saveMasterDoctorEdit('${d.id}')" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white">Save</button>
+        </div>
+      `);
+    }
+
+    async function saveMasterDoctorEdit(docId) {
+      const d = appState.doctors.find(x => x.id === docId);
+      if (!d) return;
+      d.name = document.getElementById("ed-doc-name").value.trim();
+      d.specialty = document.getElementById("ed-doc-spec").value.trim();
+      d.location = document.getElementById("ed-doc-loc").value;
+      d.tier_clinic = document.getElementById("ed-doc-tier").value.trim();
+      if (isSupabaseConfigured) {
+        await sb.from("doctors").update({
+          name: d.name, specialty: d.specialty, location: d.location, tier_clinic: d.tier_clinic
+        }).eq("id", docId);
+      }
+      saveLocalState();
+      closeModal();
+      renderMain();
+      showToast("Doctor updated.", "emerald");
+    }
+
+    async function toggleDoctorActive(docId) {
+      const d = appState.doctors.find(x => x.id === docId);
+      if (!d) return;
+      d.is_active = !d.is_active;
+      if (isSupabaseConfigured) {
+        await sb.from("doctors").update({ is_active: d.is_active }).eq("id", docId);
+      }
+      saveLocalState();
+      renderMain();
+      showToast(d.is_active ? "Doctor restored." : "Doctor archived.", "indigo");
+    }
+
+    async function addMasterSample() {
+      const name = document.getElementById("new-smp-name").value.trim();
+      const unit = document.getElementById("new-smp-unit").value.trim() || "Packs";
+      const category = document.getElementById("new-smp-cat").value.trim() || "General";
+      if (!name) return showToast("Enter sample name.", "amber");
+
+      const item = { id: uid("smp"), name, unit, category, office_total_taken: 0, is_active: true };
+      if (isSupabaseConfigured) {
+        const { data } = await sb.from("samples").insert({ name, unit, category }).select().single();
+        if (data) item.id = data.id;
+      }
+      appState.samples.unshift(item);
+      saveLocalState();
+      renderMain();
+      showToast("Sample added to master catalog.", "emerald");
+    }
+
+    function openEditSampleModal(smpId) {
+      const s = appState.samples.find(x => x.id === smpId);
+      if (!s) return;
+      openModal(`
+        <h3 class="text-base font-bold text-slate-900 mb-3">Edit Master Sample</h3>
+        <div class="space-y-2.5 text-xs">
+          <input id="ed-smp-name" type="text" value="${s.name}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <input id="ed-smp-unit" type="text" value="${s.unit}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <input id="ed-smp-cat" type="text" value="${s.category}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+        </div>
+        <div class="flex justify-end gap-2 mt-4">
+          <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
+          <button onclick="saveMasterSampleEdit('${s.id}')" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white">Save</button>
+        </div>
+      `);
+    }
+
+    async function saveMasterSampleEdit(smpId) {
+      const s = appState.samples.find(x => x.id === smpId);
+      if (!s) return;
+      s.name = document.getElementById("ed-smp-name").value.trim();
+      s.unit = document.getElementById("ed-smp-unit").value.trim();
+      s.category = document.getElementById("ed-smp-cat").value.trim();
+      if (isSupabaseConfigured) {
+        await sb.from("samples").update({ name: s.name, unit: s.unit, category: s.category }).eq("id", smpId);
+      }
+      saveLocalState();
+      closeModal();
+      renderMain();
+      showToast("Sample updated.", "emerald");
+    }
+
+    async function toggleSampleActive(smpId) {
+      const s = appState.samples.find(x => x.id === smpId);
+      if (!s) return;
+      s.is_active = !s.is_active;
+      if (isSupabaseConfigured) {
+        await sb.from("samples").update({ is_active: s.is_active }).eq("id", smpId);
+      }
+      saveLocalState();
+      renderMain();
+      showToast(s.is_active ? "Sample restored." : "Sample archived.", "indigo");
+    }
+
+    function toggleBulkCheckboxes(checked) {
+      document.querySelectorAll(".bulk-doc-cb").forEach(cb => { cb.checked = checked; });
+    }
+
+    async function saveBulkAssignments() {
+      const visibleIds = new Set(Array.from(document.querySelectorAll(".bulk-doc-cb")).map(cb => cb.value));
+      const checkedIds = Array.from(document.querySelectorAll(".bulk-doc-cb:checked")).map(cb => cb.value);
+
+      appState.doctor_assignments = appState.doctor_assignments.filter(
+        a => !(a.member_id === bulkTargetRepId && visibleIds.has(a.doctor_id))
+      );
+      checkedIds.forEach(docId => {
+        appState.doctor_assignments.push({ doctor_id: docId, member_id: bulkTargetRepId });
+      });
+
+      if (isSupabaseConfigured) {
+        await sb.from("doctor_assignments").delete().eq("member_id", bulkTargetRepId).in("doctor_id", Array.from(visibleIds));
+        if (checkedIds.length > 0) {
+          await sb.from("doctor_assignments").insert(checkedIds.map(d => ({ doctor_id: d, member_id: bulkTargetRepId })));
+        }
+      }
+      saveLocalState();
+      showToast("Bulk doctor assignments saved.", "emerald");
+    }
+
+    // Supervisor Tab 3: Plans, Quota & Doctor History
+    let historyDoctorId = "";
+
+    function renderSupPlansQuotaHistory() {
+      const rules = appState.schedule_rules;
+      if (!historyDoctorId && appState.doctors[0]) historyDoctorId = appState.doctors[0].id;
+      const docVisits = appState.visits.filter(v => v.doctor_id === historyDoctorId);
+
+      return `
+        <div class="space-y-6">
+          <!-- Schedule & Quota Exception Rules -->
+          <div class="bg-white rounded-2xl border border-slate-200 p-5">
+            <h2 class="text-base font-bold text-slate-900 mb-3">Schedule & Quota Exception Rules</h2>
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+              <div class="sm:col-span-2">
+                <label class="block font-semibold text-slate-700 mb-1">Rule Mode</label>
+                <select id="rule-mode-select" onchange="applyPresetRule(this.value)" class="w-full rounded-xl border border-slate-300 px-3 py-2">
+                  <option value="Standard (5 Work + 1 Meeting)" ${rules.mode_name.startsWith("Standard") ? "selected" : ""}>Standard (5 Work + 1 Meeting)</option>
+                  <option value="Holiday / Reduced Target" ${rules.mode_name.startsWith("Holiday") ? "selected" : ""}>Holiday / Reduced Target</option>
+                  <option value="All-Field Push" ${rules.mode_name.startsWith("All-Field") ? "selected" : ""}>All-Field Push</option>
+                </select>
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-700 mb-1">Daily Target</label>
+                <input id="rule-daily" type="number" value="${rules.daily_target}" class="w-full rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
+              </div>
+              <div>
+                <label class="block font-semibold text-slate-700 mb-1">Weekly Target</label>
+                <input id="rule-weekly" type="number" value="${rules.weekly_target}" class="w-full rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
+              </div>
+            </div>
+            <button onclick="saveScheduleRules()" class="mt-3 px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold">Apply Quota Rules</button>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Doctor History Lookup -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-5">
+              <h2 class="text-base font-bold text-slate-900 mb-3">Doctor History Lookup (Last Visit Per Employee)</h2>
+              <select onchange="historyDoctorId=this.value; renderMain();" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs mb-4">
+                ${appState.doctors.map(d => `<option value="${d.id}" ${d.id === historyDoctorId ? "selected" : ""}>${d.name} (${d.location})</option>`).join("")}
+              </select>
+              <div class="space-y-2 text-xs">
+                ${docVisits.length === 0
+                  ? `<p class="text-slate-500 py-6 text-center">No visits recorded for this doctor yet.</p>`
+                  : docVisits.map(v => {
+                    const rep = appState.profiles.find(p => p.id === v.member_id)?.full_name || "";
+                    const smp = appState.samples.find(s => s.id === v.sample_id)?.name || "None";
+                    return `
+                      <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                        <div class="flex justify-between font-bold"><span>${rep}</span><span class="tabular-nums">${v.visit_date}</span></div>
+                        <p class="text-slate-600 mt-1 tabular-nums">${v.visit_type} · ${v.sample_qty} × ${smp}</p>
+                        ${v.notes ? `<p class="text-slate-500 mt-1">${v.notes}</p>` : ""}
+                      </div>
+                    `;
+                  }).join("")}
+              </div>
+            </div>
+
+            <!-- Submitted Member Plans -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-5">
+              <h2 class="text-base font-bold text-slate-900 mb-3">Submitted Member Plans Overview</h2>
+              <div class="space-y-2.5 text-xs tabular-nums">
+                ${appState.plans.map(p => {
+                  const rep = appState.profiles.find(m => m.id === p.member_id)?.full_name || "";
+                  const totSmp = Object.values(p.planned_samples || {}).reduce((a, b) => a + Number(b || 0), 0);
+                  return `
+                    <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                      <div class="flex justify-between font-bold"><span>${rep} — ${p.plan_name}</span><span>${p.plan_type}</span></div>
+                      <p class="text-slate-600 mt-1">Entry: ${p.expected_entry_time} · Doctors: ${(p.target_doctor_ids || []).length} · Planned Office Samples: ${totSmp}</p>
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function applyPresetRule(mode) {
+      if (mode.startsWith("Standard")) {
+        document.getElementById("rule-daily").value = 12;
+        document.getElementById("rule-weekly").value = 60;
+      } else if (mode.startsWith("Holiday")) {
+        document.getElementById("rule-daily").value = 8;
+        document.getElementById("rule-weekly").value = 32;
+      } else {
+        document.getElementById("rule-daily").value = 15;
+        document.getElementById("rule-weekly").value = 75;
+      }
+    }
+
+    async function saveScheduleRules() {
+      const mode_name = document.getElementById("rule-mode-select").value;
+      const daily_target = parseInt(document.getElementById("rule-daily").value || "12", 10);
+      const weekly_target = parseInt(document.getElementById("rule-weekly").value || "60", 10);
+      appState.schedule_rules = { mode_name, daily_target, weekly_target };
+      if (isSupabaseConfigured) {
+        await sb.from("schedule_rules").update({ mode_name, daily_target, weekly_target }).eq("id", 1);
+      }
+      saveLocalState();
+      showToast("Quota rules updated across the team.", "emerald");
+    }
+
+    // Supervisor Tab 4: Requests & Variances
+    function renderSupRequests() {
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <!-- Variances -->
+          <div class="bg-white rounded-2xl border border-slate-200 p-5">
+            <h2 class="text-base font-bold text-slate-900 mb-3">Quota Variance Requests</h2>
+            <div class="space-y-3 text-xs">
+              ${appState.quota_variances.length === 0 ? `<p class="text-slate-500 text-center py-6">No variance requests.</p>` : appState.quota_variances.map(v => {
+                const rep = appState.profiles.find(p => p.id === v.member_id)?.full_name || "";
+                return `
+                  <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                    <div class="flex justify-between font-bold"><span>${rep}</span><span class="tabular-nums">${v.variance_date}</span></div>
+                    <p class="text-slate-600 mt-1 tabular-nums">${v.variance_type === "over_quota" ? ">Target" : "<Target"} (${v.visit_count}/${v.target_count}) · Status: <strong>${v.status}</strong></p>
+                    <p class="text-slate-500 mt-1">${v.reason || ""}</p>
+                    <div class="flex gap-2 mt-2">
+                      <button onclick="decideVariance('${v.id}', 'Approved')" class="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-semibold">Approve</button>
+                      <button onclick="decideVariance('${v.id}', 'Rejected')" class="px-2.5 py-1 rounded-lg bg-rose-600 text-white font-semibold">Reject</button>
+                    </div>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+
+          <!-- Gifts -->
+          <div class="bg-white rounded-2xl border border-slate-200 p-5">
+            <h2 class="text-base font-bold text-slate-900 mb-3">Gift Requests Queue</h2>
+            <div class="space-y-3 text-xs">
+              ${appState.gift_requests.map(g => {
+                const rep = appState.profiles.find(p => p.id === g.member_id)?.full_name || "";
+                return `
+                  <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                    <div class="flex justify-between font-bold"><span>${rep}</span><span class="tabular-nums">$${g.estimated_price}</span></div>
+                    <p class="font-semibold text-slate-800 mt-1">${g.gift_details}</p>
+                    <p class="text-slate-500">Buyer: ${g.buyer_role} · Status: <strong>${g.status}</strong></p>
+                    <div class="flex flex-wrap gap-1.5 mt-2">
+                      <button onclick="updateGiftStatus('${g.id}', 'Under Review')" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 font-semibold">Under Review</button>
+                      <button onclick="updateGiftStatus('${g.id}', 'Approved')" class="px-2 py-1 rounded-lg bg-emerald-600 text-white font-semibold">Approve</button>
+                      <button onclick="updateGiftStatus('${g.id}', 'Rejected')" class="px-2 py-1 rounded-lg bg-rose-600 text-white font-semibold">Reject</button>
+                      ${g.status === "Approved" && g.buyer_role === "Team Supervisor"
+                        ? `<button onclick="markGiftBought('${g.id}')" class="px-2 py-1 rounded-lg bg-indigo-600 text-white font-semibold">Mark Bought / Done</button>`
+                        : ""}
+                    </div>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+
+          <!-- Day-Offs -->
+          <div class="bg-white rounded-2xl border border-slate-200 p-5">
+            <h2 class="text-base font-bold text-slate-900 mb-3">Day-Off Requests Queue</h2>
+            <div class="space-y-3 text-xs">
+              ${appState.day_off_requests.map(d => {
+                const rep = appState.profiles.find(p => p.id === d.member_id)?.full_name || "";
+                return `
+                  <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                    <div class="flex justify-between font-bold"><span>${rep}</span><span class="tabular-nums">${d.requested_date}</span></div>
+                    <p class="text-slate-500 mt-1">${d.reason || ""} · Status: <strong>${d.status}</strong></p>
+                    <div class="flex gap-1.5 mt-2">
+                      <button onclick="updateDayOffStatus('${d.id}', 'Under Review')" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 font-semibold">Under Review</button>
+                      <button onclick="updateDayOffStatus('${d.id}', 'Approved')" class="px-2 py-1 rounded-lg bg-emerald-600 text-white font-semibold">Approve</button>
+                      <button onclick="updateDayOffStatus('${d.id}', 'Rejected')" class="px-2 py-1 rounded-lg bg-rose-600 text-white font-semibold">Reject</button>
+                    </div>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function decideVariance(varId, status) {
+      const v = appState.quota_variances.find(x => x.id === varId);
+      if (!v) return;
+      v.status = status;
+      if (isSupabaseConfigured) {
+        await sb.from("quota_variances").update({ status }).eq("id", varId);
+      }
+      await pushNotification(v.member_id, "Quota Variances", `Your quota variance for ${v.variance_date} was ${status}.`);
+      saveLocalState();
+      renderMain();
+      showToast(`Variance marked ${status}.`, status === "Approved" ? "emerald" : "rose");
+    }
+
+    async function updateGiftStatus(giftId, status) {
+      const g = appState.gift_requests.find(x => x.id === giftId);
+      if (!g) return;
+      g.status = status;
+      if (isSupabaseConfigured) {
+        await sb.from("gift_requests").update({ status }).eq("id", giftId);
+      }
+      await pushNotification(g.member_id, "Gifts & Day-Off", `Gift request (${g.gift_details}) status updated to ${status}.`);
+      saveLocalState();
+      renderMain();
+      showToast(`Gift status: ${status}`, "indigo");
+    }
+
+    async function updateDayOffStatus(dayId, status) {
+      const d = appState.day_off_requests.find(x => x.id === dayId);
+      if (!d) return;
+      d.status = status;
+      if (isSupabaseConfigured) {
+        await sb.from("day_off_requests").update({ status }).eq("id", dayId);
+      }
+      await pushNotification(d.member_id, "Gifts & Day-Off", `Day-off request for ${d.requested_date} is now ${status}.`);
+      saveLocalState();
+      renderMain();
+      showToast(`Day-off status: ${status}`, "indigo");
+    }
+
+    // Supervisor Tab 5: Assign Tasks & Reset Demo
+    function renderSupTasks() {
+      const reps = appState.profiles.filter(p => p.role === "member");
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div class="bg-white rounded-2xl border border-slate-200 p-5 h-fit space-y-3 text-xs">
+            <h2 class="text-base font-bold text-slate-900">Assign Individual or Team Task</h2>
+            <input id="task-title" type="text" placeholder="Task Title" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+            <div class="grid grid-cols-2 gap-2">
+              <select id="task-scope" class="rounded-xl border border-slate-300 px-3 py-2">
+                <option value="team">Team Task (All 25)</option>
+                <option value="individual">Individual Task</option>
+              </select>
+              <select id="task-priority" class="rounded-xl border border-slate-300 px-3 py-2">
+                <option value="High">High Priority</option>
+                <option value="Medium">Medium Priority</option>
+                <option value="Low">Low Priority</option>
+              </select>
+            </div>
+            <select id="task-assignee" class="w-full rounded-xl border border-slate-300 px-3 py-2">
+              <option value="">Responsible Member (for Individual)</option>
+              ${reps.map(r => `<option value="${r.id}">${r.full_name} (${r.region})</option>`).join("")}
+            </select>
+            <input id="task-due" type="date" value="${todayISO()}" class="w-full rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
+            <button onclick="createTask()" class="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-semibold">Publish Task</button>
+
+            ${!isSupabaseConfigured ? `
+              <div class="pt-4 border-t border-slate-100">
+                <button onclick="resetDemoState()" class="w-full py-2 rounded-xl border border-rose-200 text-rose-700 hover:bg-rose-50 font-semibold">Reset Demo State</button>
+              </div>
+            ` : ""}
+          </div>
+
+          <div class="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-5">
+            <h2 class="text-base font-bold text-slate-900 mb-3">All Published Tasks</h2>
+            <div class="space-y-2.5 text-xs">
+              ${appState.tasks.map(t => {
+                const owner = t.scope === "team" ? "All Team" : (appState.profiles.find(p => p.id === t.assigned_to)?.full_name || "");
+                return `
+                  <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
+                    <div>
+                      <p class="font-bold text-slate-900">${t.title}</p>
+                      <p class="text-slate-500 mt-0.5 tabular-nums">${t.scope.toUpperCase()} · ${t.priority} · ${owner} · Due ${t.due_date}</p>
+                    </div>
+                    <button onclick="cycleTaskStatus('${t.id}')" class="px-3 py-1.5 rounded-lg bg-white border border-slate-200 font-semibold">${t.status}</button>
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function createTask() {
+      const title = document.getElementById("task-title").value.trim();
+      const scope = document.getElementById("task-scope").value;
+      const priority = document.getElementById("task-priority").value;
+      const assigned_to = scope === "individual" ? (document.getElementById("task-assignee").value || null) : null;
+      const due_date = document.getElementById("task-due").value || todayISO();
+      if (!title) return showToast("Enter a task title.", "amber");
+
+      const item = {
+        id: uid("task"), title, scope, priority, assigned_to, due_date, status: "Open", created_at: new Date().toISOString()
+      };
+      if (isSupabaseConfigured) {
+        const { data } = await sb.from("tasks").insert({ title, scope, priority, assigned_to, due_date }).select().single();
+        if (data) item.id = data.id;
+      }
+      appState.tasks.unshift(item);
+      if (assigned_to) {
+        await pushNotification(assigned_to, "Tasks", `New ${priority} priority task assigned: ${title}`);
+      }
+      saveLocalState();
+      renderTasksBanner();
+      renderMain();
+      showToast("Task published.", "emerald");
+    }
+
+    function resetDemoState() {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(QUEUE_KEY);
+      offlineQueue = [];
+      appState = buildSeedState();
+      activeUserId = appState.profiles[0].id;
+      saveLocalState();
+      launchAppShell();
+      showToast("Demo data reset to defaults.", "indigo");
+    }
+
+    bootstrap();
+  </script>
+</body>
+</html>
