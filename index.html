@@ -200,6 +200,7 @@
     // =========================================================
     const REGIONS = ["Damascus", "Aleppo", "Homs", "Idlib", "Latakia", "Hama", "Daraa", "Tartous"];
     const STORAGE_KEY = "medfield_ops_state_v2";
+    const LIVE_CACHE_KEY = "medfield_ops_live_cache_v1";
     const QUEUE_KEY = "medfield_ops_offline_queue_v2";
 
     let appState = null;
@@ -212,6 +213,8 @@
     let doctorSearchTerm = "";
     let selectedDoctorId = "";
     let visitTypeSelection = "Physician Visit";
+    let isRealtimeSyncing = false;
+    let realtimeRefreshTimer = null;
 
     function todayISO() {
       return new Date().toISOString().slice(0, 10);
@@ -470,6 +473,10 @@
     function saveLocalState() {
       if (!isSupabaseConfigured) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+      } else if (appState) {
+        try {
+          localStorage.setItem(LIVE_CACHE_KEY, JSON.stringify({ state: appState, savedAt: Date.now() }));
+        } catch (_) {}
       }
       localStorage.setItem(QUEUE_KEY, JSON.stringify(offlineQueue));
     }
@@ -485,7 +492,7 @@
       el.className = `pointer-events-auto px-4 py-3 rounded-xl border shadow-lg text-xs font-semibold transition ${colors[tone] || colors.indigo}`;
       el.textContent = msg;
       document.getElementById("toast-container").appendChild(el);
-      setTimeout(() => el.remove(), 3600);
+      setTimeout(() => el.remove(), 3000);
     }
 
     function openModal(html) {
@@ -498,7 +505,7 @@
     }
 
     // =========================================================
-    // 3. AUTHENTICATION & DATA BOOTSTRAP
+    // 3. AUTHENTICATION & DATA BOOTSTRAP (OPTIMIZED)
     // =========================================================
     async function bootstrap() {
       if (!isSupabaseConfigured) {
@@ -551,41 +558,65 @@
 
     async function signOutSupabase() {
       if (sb) await sb.auth.signOut();
+      localStorage.removeItem(LIVE_CACHE_KEY);
       location.reload();
     }
 
-    async function loadLiveSupabaseState(email) {
+    async function loadLiveSupabaseState(email, silent = false) {
+      const normalizedEmail = (email || "").trim().toLowerCase();
+
+      // Fast path: if a cached snapshot exists for this email, show the shell immediately while refreshing
+      if (!silent && !appState) {
+        try {
+          const cachedRaw = localStorage.getItem(LIVE_CACHE_KEY);
+          if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw);
+            const cachedMe = cached?.state?.profiles?.find(p => (p.email || "").toLowerCase() === normalizedEmail);
+            if (cachedMe && Date.now() - (cached.savedAt || 0) < 15 * 60 * 1000) {
+              appState = cached.state;
+              activeUserId = cachedMe.id;
+              document.getElementById("auth-screen").classList.add("hidden");
+              document.getElementById("signout-btn").classList.remove("hidden");
+              launchAppShell();
+            }
+          }
+        } catch (_) {}
+      }
+
       const [
         allowRes, profRes, docRes, assignRes, smpRes, invRes,
         pickRes, sessRes, varRes, visRes, planRes, giftRes,
         dayRes, taskRes, notifRes, ruleRes
       ] = await Promise.all([
-        sb.from("allowed_emails").select("*"),
-        sb.from("profiles").select("*").order("member_code"),
-        sb.from("doctors").select("*").order("name"),
-        sb.from("doctor_assignments").select("*"),
-        sb.from("samples").select("*").order("name"),
-        sb.from("member_sample_inventory").select("*"),
-        sb.from("sample_pickups").select("*").order("created_at", { ascending: false }),
-        sb.from("field_sessions").select("*").order("started_at", { ascending: false }),
-        sb.from("quota_variances").select("*").order("created_at", { ascending: false }),
-        sb.from("visits").select("*").order("created_at", { ascending: false }),
-        sb.from("plans").select("*").order("created_at", { ascending: false }),
-        sb.from("gift_requests").select("*").order("created_at", { ascending: false }),
-        sb.from("day_off_requests").select("*").order("created_at", { ascending: false }),
-        sb.from("tasks").select("*").order("created_at", { ascending: false }),
-        sb.from("notifications").select("*").order("created_at", { ascending: false }),
-        sb.from("schedule_rules").select("*").eq("id", 1).single()
+        sb.from("allowed_emails").select("email, role, member_code, full_name, region"),
+        sb.from("profiles").select("id, email, member_code, full_name, role, region, live_status, active_round_started_at, last_round_duration_sec").order("member_code"),
+        sb.from("doctors").select("id, name, specialty, location, tier_clinic, is_active").order("name"),
+        sb.from("doctor_assignments").select("doctor_id, member_id"),
+        sb.from("samples").select("id, name, unit, category, office_total_taken, is_active").order("name"),
+        sb.from("member_sample_inventory").select("member_id, sample_id, stock"),
+        sb.from("sample_pickups").select("id, member_id, sample_id, quantity, note, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("field_sessions").select("id, member_id, started_at, ended_at, duration_sec").order("started_at", { ascending: false }).limit(200),
+        sb.from("quota_variances").select("id, member_id, variance_date, variance_type, visit_count, target_count, reason, status, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("visits").select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at").order("created_at", { ascending: false }).limit(500),
+        sb.from("plans").select("id, member_id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("gift_requests").select("id, member_id, gift_details, estimated_price, buyer_role, reason, status, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("day_off_requests").select("id, member_id, requested_date, reason, status, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("tasks").select("id, title, scope, priority, assigned_to, due_date, status, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("notifications").select("id, recipient_id, category, message, is_read, created_at").order("created_at", { ascending: false }).limit(150),
+        sb.from("schedule_rules").select("mode_name, daily_target, weekly_target").eq("id", 1).maybeSingle()
       ]);
 
       const profiles = profRes.data || [];
-      const me = profiles.find(p => p.email.toLowerCase() === email.toLowerCase());
+      const me = profiles.find(p => (p.email || "").toLowerCase() === normalizedEmail);
       if (!me) {
         showToast("Your email is not registered in profiles yet. Ask the Supervisor to add you.", "rose");
         await sb.auth.signOut();
+        document.getElementById("app-shell").classList.add("hidden");
+        document.getElementById("auth-screen").classList.remove("hidden");
         return;
       }
 
+      const previousActiveId = activeUserId;
       appState = {
         schedule_rules: ruleRes.data || { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
         allowlist: allowRes.data || [],
@@ -605,19 +636,84 @@
         notifications: notifRes.data || []
       };
 
-      activeUserId = me.id;
+      activeUserId = (previousActiveId && profiles.some(p => p.id === previousActiveId))
+        ? previousActiveId
+        : me.id;
+
+      saveLocalState();
       document.getElementById("auth-screen").classList.add("hidden");
       document.getElementById("signout-btn").classList.remove("hidden");
       subscribeSupabaseRealtime();
       launchAppShell();
     }
 
+    async function refreshSingleTable(tableName) {
+      if (!sb || !appState || isRealtimeSyncing) return;
+      isRealtimeSyncing = true;
+      try {
+        switch (tableName) {
+          case "tasks": {
+            const { data } = await sb.from("tasks").select("id, title, scope, priority, assigned_to, due_date, status, created_at").order("created_at", { ascending: false }).limit(200);
+            if (data) {
+              appState.tasks = data;
+              renderTasksBanner();
+              if (currentUser().role === "supervisor" && activeTab === 4) renderMain();
+            }
+            break;
+          }
+          case "notifications": {
+            const { data } = await sb.from("notifications").select("id, recipient_id, category, message, is_read, created_at").order("created_at", { ascending: false }).limit(150);
+            if (data) {
+              appState.notifications = data;
+              renderNotifications();
+            }
+            break;
+          }
+          case "profiles": {
+            const { data } = await sb.from("profiles").select("id, email, member_code, full_name, role, region, live_status, active_round_started_at, last_round_duration_sec").order("member_code");
+            if (data) {
+              appState.profiles = data;
+              renderHeader();
+              renderMain();
+            }
+            break;
+          }
+          case "visits": {
+            const { data } = await sb.from("visits").select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at").order("created_at", { ascending: false }).limit(500);
+            if (data) {
+              appState.visits = data;
+              renderMain();
+            }
+            break;
+          }
+          case "doctor_assignments": {
+            const { data } = await sb.from("doctor_assignments").select("doctor_id, member_id");
+            if (data) {
+              appState.doctor_assignments = data;
+              if (currentUser().role === "supervisor" && activeTab === 1) renderMain();
+            }
+            break;
+          }
+          default: {
+            const { data: { session } } = await sb.auth.getSession();
+            if (session) await loadLiveSupabaseState(session.user.email, true);
+          }
+        }
+        saveLocalState();
+      } finally {
+        isRealtimeSyncing = false;
+      }
+    }
+
     function subscribeSupabaseRealtime() {
-      if (!sb) return;
+      if (!sb || sb.__medfieldChannelSubscribed) return;
+      sb.__medfieldChannelSubscribed = true;
       sb.channel("medfield-live")
-        .on("postgres_changes", { event: "*", schema: "public" }, async () => {
-          const { data: { session } } = await sb.auth.getSession();
-          if (session) await loadLiveSupabaseState(session.user.email);
+        .on("postgres_changes", { event: "*", schema: "public" }, payload => {
+          clearTimeout(realtimeRefreshTimer);
+          realtimeRefreshTimer = setTimeout(() => {
+            refreshSingleTable(payload?.table);
+          }, 120);
         })
         .subscribe();
     }
@@ -750,7 +846,7 @@
     // =========================================================
     // 5. OFFLINE QUEUE, NOTIFICATIONS & ALLOWLIST
     // =========================================================
-    async function pushNotification(recipientId, category, message) {
+    function pushNotification(recipientId, category, message) {
       const item = {
         id: uid("notif"),
         recipient_id: recipientId,
@@ -760,15 +856,18 @@
         created_at: new Date().toISOString()
       };
       appState.notifications.unshift(item);
+      saveLocalState();
+      renderNotifications();
+
       if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("notifications").insert({
+        sb.from("notifications").insert({
           recipient_id: recipientId,
           category,
           message
-        });
+        }).then(({ data }) => {
+          if (data && data[0]) item.id = data[0].id;
+        }).catch(() => {});
       }
-      saveLocalState();
-      renderNotifications();
     }
 
     function queueOfflineAction(action) {
@@ -837,7 +936,7 @@
       offlineQueue = [];
       saveLocalState();
       updateSyncPill();
-      await pushNotification(sup.id, "Field Rounds", `${user.full_name} synced ${count} offline action(s).`);
+      pushNotification(sup.id, "Field Rounds", `${user.full_name} synced ${count} offline action(s).`);
       closeModal();
       showToast(`Synced ${count} queued action(s).`, "emerald");
       renderMain();
@@ -881,26 +980,26 @@
         `).join("");
     }
 
-    async function markNotifRead(id) {
+    function markNotifRead(id) {
       const n = appState.notifications.find(x => x.id === id);
       if (n && !n.is_read) {
         n.is_read = true;
-        if (isSupabaseConfigured && !simulatedOffline) {
-          await sb.from("notifications").update({ is_read: true }).eq("id", id);
-        }
         saveLocalState();
         renderNotifications();
+        if (isSupabaseConfigured && !simulatedOffline) {
+          sb.from("notifications").update({ is_read: true }).eq("id", id).catch(() => {});
+        }
       }
     }
 
-    async function markAllNotificationsRead() {
+    function markAllNotificationsRead() {
       const user = currentUser();
       appState.notifications.forEach(n => { if (n.recipient_id === user.id) n.is_read = true; });
-      if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("notifications").update({ is_read: true }).eq("recipient_id", user.id);
-      }
       saveLocalState();
       renderNotifications();
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.from("notifications").update({ is_read: true }).eq("recipient_id", user.id).catch(() => {});
+      }
     }
 
     function openAllowlistModal() {
@@ -977,7 +1076,10 @@
         const { error: e1 } = await sb.from("allowed_emails").insert({ email, role, member_code, full_name, region });
         if (e1) return showToast(e1.message, "rose");
         const { data: prof } = await sb.from("profiles").insert({ email, role, member_code, full_name, region }).select().single();
-        if (prof) appState.profiles.push(prof);
+        appState.profiles.push(prof || {
+          id: uid("prof"), email, member_code, full_name, role, region,
+          live_status: "Inactive Yet", active_round_started_at: null, last_round_duration_sec: 0
+        });
       } else {
         appState.profiles.push({
           id: uid("prof"), email, member_code, full_name, role, region,
@@ -991,18 +1093,18 @@
       renderHeader();
     }
 
-    async function removeAllowlistEmail(email) {
+    function removeAllowlistEmail(email) {
       appState.allowlist = appState.allowlist.filter(a => a.email !== email);
-      if (isSupabaseConfigured) {
-        await sb.from("allowed_emails").delete().eq("email", email);
-      }
       saveLocalState();
       showToast("Removed from allowlist.", "indigo");
       openAllowlistModal();
+      if (isSupabaseConfigured) {
+        sb.from("allowed_emails").delete().eq("email", email).catch(() => {});
+      }
     }
 
     // =========================================================
-    // 6. PERSISTENT TASKS & DEADLINES BANNER
+    // 6. PERSISTENT TASKS & DEADLINES BANNER (INSTANT UI)
     // =========================================================
     function toggleTasksBanner() {
       tasksBannerOpen = !tasksBannerOpen;
@@ -1059,19 +1161,21 @@
         }).join("");
     }
 
-    async function cycleTaskStatus(taskId) {
+    function cycleTaskStatus(taskId) {
       const task = appState.tasks.find(t => t.id === taskId);
       if (!task) return;
       const order = ["Open", "In Progress", "Completed"];
       task.status = order[(order.indexOf(task.status) + 1) % order.length];
-      if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("tasks").update({ status: task.status }).eq("id", taskId);
-      }
+
       saveLocalState();
       renderTasksBanner();
       if (currentUser().role === "supervisor" && activeTab === 4) renderMain();
-      await pushNotification(supervisorUser().id, "Tasks", `${currentUser().full_name} marked task "${task.title}" as ${task.status}.`);
       showToast(`Task status: ${task.status}`, "indigo");
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.from("tasks").update({ status: task.status }).eq("id", taskId).catch(() => {});
+      }
+      pushNotification(supervisorUser().id, "Tasks", `${currentUser().full_name} marked task "${task.title}" as ${task.status}.`);
     }
 
     // =========================================================
@@ -1385,7 +1489,7 @@
       `;
     }
 
-    async function setFieldStatus(newStatus) {
+    function setFieldStatus(newStatus) {
       const user = currentUser();
       const sup = supervisorUser();
       const nowIso = new Date().toISOString();
@@ -1393,7 +1497,7 @@
       if (newStatus === "In the Field") {
         user.live_status = "In the Field";
         user.active_round_started_at = nowIso;
-        await pushNotification(sup.id, "Field Rounds", `${user.full_name} started field round in ${user.region}.`);
+        pushNotification(sup.id, "Field Rounds", `${user.full_name} started field round in ${user.region}.`);
       } else if (newStatus === "Finished Field") {
         const dur = user.active_round_started_at
           ? Math.floor((Date.now() - new Date(user.active_round_started_at).getTime()) / 1000)
@@ -1404,10 +1508,10 @@
         appState.field_sessions.unshift({
           id: uid("sess"), member_id: user.id, started_at: nowIso, ended_at: nowIso, duration_sec: dur
         });
-        await pushNotification(sup.id, "Field Rounds", `${user.full_name} finished field round (${formatDuration(dur)}).`);
+        pushNotification(sup.id, "Field Rounds", `${user.full_name} finished field round (${formatDuration(dur)}).`);
       } else {
         user.live_status = newStatus;
-        await pushNotification(sup.id, "Field Rounds", `${user.full_name} set status to ${newStatus} at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
+        pushNotification(sup.id, "Field Rounds", `${user.full_name} set status to ${newStatus} at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
       }
 
       const payload = {
@@ -1416,15 +1520,15 @@
         last_round_duration_sec: user.last_round_duration_sec
       };
 
-      if (simulatedOffline || !navigator.onLine) {
-        queueOfflineAction({ type: "status", label: `Status → ${newStatus}`, member_id: user.id, payload });
-      } else if (isSupabaseConfigured) {
-        await sb.from("profiles").update(payload).eq("id", user.id);
-      }
-
       saveLocalState();
       renderMain();
       showToast(`Status updated: ${newStatus}`, "emerald");
+
+      if (simulatedOffline || !navigator.onLine) {
+        queueOfflineAction({ type: "status", label: `Status → ${newStatus}`, member_id: user.id, payload });
+      } else if (isSupabaseConfigured) {
+        sb.from("profiles").update(payload).eq("id", user.id).catch(() => {});
+      }
     }
 
     function selectDoctorForVisit(docId) {
@@ -1490,7 +1594,7 @@
       finalizeVisitSubmission({ doctorId, sampleId, sampleQty, visitDate, notes, varianceId: null });
     }
 
-    async function confirmOverQuotaVisit(doctorId, sampleId, sampleQty, visitDate, notes) {
+    function confirmOverQuotaVisit(doctorId, sampleId, sampleQty, visitDate, notes) {
       const user = currentUser();
       const reason = document.getElementById("over-quota-reason").value.trim() || "Field compensation coverage";
       const dayCount = appState.visits.filter(v => v.member_id === user.id && v.visit_date === visitDate).length + 1;
@@ -1506,20 +1610,9 @@
         created_at: new Date().toISOString()
       };
       appState.quota_variances.unshift(variance);
-      if (isSupabaseConfigured && !simulatedOffline) {
-        const { data } = await sb.from("quota_variances").insert({
-          member_id: user.id,
-          variance_date: visitDate,
-          variance_type: "over_quota",
-          visit_count: dayCount,
-          target_count: appState.schedule_rules.daily_target,
-          reason
-        }).select().single();
-        if (data) variance.id = data.id;
-      }
-      await pushNotification(supervisorUser().id, "Quota Variances", `${user.full_name} requested >${appState.schedule_rules.daily_target}/day variance on ${visitDate}.`);
+      pushNotification(supervisorUser().id, "Quota Variances", `${user.full_name} requested >${appState.schedule_rules.daily_target}/day variance on ${visitDate}.`);
       closeModal();
-      await finalizeVisitSubmission({
+      finalizeVisitSubmission({
         doctorId,
         sampleId: sampleId || null,
         sampleQty,
@@ -1527,9 +1620,22 @@
         notes,
         varianceId: variance.id
       });
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.from("quota_variances").insert({
+          member_id: user.id,
+          variance_date: visitDate,
+          variance_type: "over_quota",
+          visit_count: dayCount,
+          target_count: appState.schedule_rules.daily_target,
+          reason
+        }).select().single().then(({ data }) => {
+          if (data) variance.id = data.id;
+        }).catch(() => {});
+      }
     }
 
-    async function finalizeVisitSubmission({ doctorId, sampleId, sampleQty, visitDate, notes, varianceId }) {
+    function finalizeVisitSubmission({ doctorId, sampleId, sampleQty, visitDate, notes, varianceId }) {
       const user = currentUser();
       const tempId = uid("vis");
 
@@ -1565,16 +1671,17 @@
         p_variance_id: varianceId
       };
 
-      if (simulatedOffline || !navigator.onLine) {
-        queueOfflineAction({ type: "visit", label: `Visit logged (${visitDate})`, payload: rpcPayload });
-      } else if (isSupabaseConfigured) {
-        const { error } = await sb.rpc("log_visit_atomic", rpcPayload);
-        if (error) showToast(error.message, "rose");
-      }
-
       saveLocalState();
       renderMain();
       showToast("Field visit logged successfully.", "emerald");
+
+      if (simulatedOffline || !navigator.onLine) {
+        queueOfflineAction({ type: "visit", label: `Visit logged (${visitDate})`, payload: rpcPayload });
+      } else if (isSupabaseConfigured) {
+        sb.rpc("log_visit_atomic", rpcPayload).then(({ error }) => {
+          if (error) showToast(error.message, "rose");
+        }).catch(() => {});
+      }
     }
 
     function openEditVisitModal(visitId) {
@@ -1602,18 +1709,20 @@
       `);
     }
 
-    async function saveEditedVisit(visitId) {
+    function saveEditedVisit(visitId) {
       const v = appState.visits.find(x => x.id === visitId);
       if (!v) return;
       v.visit_type = document.getElementById("edit-vis-type").value;
       v.notes = document.getElementById("edit-vis-notes").value.trim();
-      if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("visits").update({ visit_type: v.visit_type, notes: v.notes }).eq("id", visitId);
-      }
+
       saveLocalState();
       closeModal();
       renderMain();
       showToast("Visit updated.", "emerald");
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.from("visits").update({ visit_type: v.visit_type, notes: v.notes }).eq("id", visitId).catch(() => {});
+      }
     }
 
     // Tab 2: My Quota & Stats
@@ -1702,7 +1811,7 @@
       `);
     }
 
-    async function submitUnderQuotaVariance() {
+    function submitUnderQuotaVariance() {
       const user = currentUser();
       const date = document.getElementById("under-var-date").value || todayISO();
       const reason = document.getElementById("under-var-reason").value.trim();
@@ -1720,16 +1829,17 @@
         created_at: new Date().toISOString()
       };
       appState.quota_variances.unshift(item);
-      if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("quota_variances").insert({
-          member_id: user.id, variance_date: date, variance_type: "under_quota",
-          visit_count: count, target_count: appState.schedule_rules.daily_target, reason
-        });
-      }
-      await pushNotification(supervisorUser().id, "Quota Variances", `${user.full_name} submitted a <${appState.schedule_rules.daily_target}/day variance for ${date}.`);
       saveLocalState();
       closeModal();
       showToast("Variance request sent to Supervisor.", "emerald");
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.from("quota_variances").insert({
+          member_id: user.id, variance_date: date, variance_type: "under_quota",
+          visit_count: count, target_count: appState.schedule_rules.daily_target, reason
+        }).catch(() => {});
+      }
+      pushNotification(supervisorUser().id, "Quota Variances", `${user.full_name} submitted a <${appState.schedule_rules.daily_target}/day variance for ${date}.`);
     }
 
     // Tab 3: Plans & Actuals
@@ -1826,7 +1936,7 @@
       `;
     }
 
-    async function saveNewPlan() {
+    function saveNewPlan() {
       const user = currentUser();
       const plan_name = document.getElementById("plan-name").value.trim();
       const plan_type = document.getElementById("plan-type").value;
@@ -1845,17 +1955,18 @@
         created_at: new Date().toISOString()
       };
       appState.plans.unshift(item);
-      if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("plans").insert({
-          member_id: user.id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples
-        });
-      }
       saveLocalState();
       renderMain();
       showToast("Plan saved.", "emerald");
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.from("plans").insert({
+          member_id: user.id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples
+        }).catch(() => {});
+      }
     }
 
-    async function duplicateLastPlan() {
+    function duplicateLastPlan() {
       const user = currentUser();
       const last = appState.plans.find(p => p.member_id === user.id);
       if (!last) return;
@@ -1866,19 +1977,20 @@
         created_at: new Date().toISOString()
       };
       appState.plans.unshift(copy);
+      saveLocalState();
+      renderMain();
+      showToast("Duplicated last plan.", "indigo");
+
       if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("plans").insert({
+        sb.from("plans").insert({
           member_id: user.id,
           plan_name: copy.plan_name,
           plan_type: copy.plan_type,
           expected_entry_time: copy.expected_entry_time,
           target_doctor_ids: copy.target_doctor_ids,
           planned_samples: copy.planned_samples
-        });
+        }).catch(() => {});
       }
-      saveLocalState();
-      renderMain();
-      showToast("Duplicated last plan.", "indigo");
     }
 
     // Tab 4: Samples & Inventory
@@ -1957,7 +2069,7 @@
       `;
     }
 
-    async function takeSamplesFromOffice() {
+    function takeSamplesFromOffice() {
       const user = currentUser();
       const sampleId = document.getElementById("pickup-sample-id").value;
       const qty = parseInt(document.getElementById("pickup-qty").value || "0", 10);
@@ -1978,16 +2090,16 @@
         id: uid("pick"), member_id: user.id, sample_id: sampleId, quantity: qty, note, created_at: new Date().toISOString()
       });
 
-      if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.rpc("take_samples_from_office", {
-          p_member_id: user.id, p_sample_id: sampleId, p_qty: qty, p_note: note
-        });
-      }
-
-      await pushNotification(supervisorUser().id, "Field Rounds", `${user.full_name} took ${qty} ${smp?.unit || "units"} of ${smp?.name} from office.`);
       saveLocalState();
       renderMain();
       showToast("Office sample pickup recorded.", "emerald");
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.rpc("take_samples_from_office", {
+          p_member_id: user.id, p_sample_id: sampleId, p_qty: qty, p_note: note
+        }).catch(() => {});
+      }
+      pushNotification(supervisorUser().id, "Field Rounds", `${user.full_name} took ${qty} ${smp?.unit || "units"} of ${smp?.name} from office.`);
     }
 
     // Tab 5: Gifts & Day-Off
@@ -2055,7 +2167,7 @@
       `;
     }
 
-    async function submitGiftRequest() {
+    function submitGiftRequest() {
       const user = currentUser();
       const gift_details = document.getElementById("gift-details").value.trim();
       const estimated_price = parseFloat(document.getElementById("gift-price").value || "0");
@@ -2068,32 +2180,34 @@
         buyer_role, reason, status: "Pending", created_at: new Date().toISOString()
       };
       appState.gift_requests.unshift(item);
-      if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("gift_requests").insert({
-          member_id: user.id, gift_details, estimated_price, buyer_role, reason
-        });
-      }
-      await pushNotification(supervisorUser().id, "Gifts & Day-Off", `${user.full_name} requested a gift: ${gift_details} ($${estimated_price}).`);
       saveLocalState();
       renderMain();
       showToast("Gift request submitted.", "emerald");
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.from("gift_requests").insert({
+          member_id: user.id, gift_details, estimated_price, buyer_role, reason
+        }).catch(() => {});
+      }
+      pushNotification(supervisorUser().id, "Gifts & Day-Off", `${user.full_name} requested a gift: ${gift_details} ($${estimated_price}).`);
     }
 
-    async function markGiftBought(giftId) {
+    function markGiftBought(giftId) {
       const g = appState.gift_requests.find(x => x.id === giftId);
       if (!g) return;
       g.status = "Bought / Done";
-      if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("gift_requests").update({ status: "Bought / Done" }).eq("id", giftId);
-      }
-      const targetRecipient = currentUser().role === "supervisor" ? g.member_id : supervisorUser().id;
-      await pushNotification(targetRecipient, "Gifts & Day-Off", `Gift Done & Implemented: ${g.gift_details}.`);
       saveLocalState();
       renderMain();
       showToast("Gift marked Bought / Done.", "emerald");
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.from("gift_requests").update({ status: "Bought / Done" }).eq("id", giftId).catch(() => {});
+      }
+      const targetRecipient = currentUser().role === "supervisor" ? g.member_id : supervisorUser().id;
+      pushNotification(targetRecipient, "Gifts & Day-Off", `Gift Done & Implemented: ${g.gift_details}.`);
     }
 
-    async function submitDayOffRequest() {
+    function submitDayOffRequest() {
       const user = currentUser();
       const requested_date = document.getElementById("dayoff-date").value;
       const reason = document.getElementById("dayoff-reason").value.trim();
@@ -2103,13 +2217,14 @@
         id: uid("day"), member_id: user.id, requested_date, reason, status: "Pending", created_at: new Date().toISOString()
       };
       appState.day_off_requests.unshift(item);
-      if (isSupabaseConfigured && !simulatedOffline) {
-        await sb.from("day_off_requests").insert({ member_id: user.id, requested_date, reason });
-      }
-      await pushNotification(supervisorUser().id, "Gifts & Day-Off", `${user.full_name} requested day off on ${requested_date}.`);
       saveLocalState();
       renderMain();
       showToast("Day-off request submitted.", "emerald");
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        sb.from("day_off_requests").insert({ member_id: user.id, requested_date, reason }).catch(() => {});
+      }
+      pushNotification(supervisorUser().id, "Gifts & Day-Off", `${user.full_name} requested day off on ${requested_date}.`);
     }
 
     // =========================================================
@@ -2311,7 +2426,7 @@
       `;
     }
 
-    async function addMasterDoctor() {
+    function addMasterDoctor() {
       const name = document.getElementById("new-doc-name").value.trim();
       const specialty = document.getElementById("new-doc-spec").value.trim();
       const location = document.getElementById("new-doc-loc").value;
@@ -2319,14 +2434,16 @@
       if (!name || !specialty) return showToast("Enter doctor name and specialty.", "amber");
 
       const item = { id: uid("doc"), name, specialty, location, tier_clinic, is_active: true };
-      if (isSupabaseConfigured) {
-        const { data } = await sb.from("doctors").insert({ name, specialty, location, tier_clinic }).select().single();
-        if (data) item.id = data.id;
-      }
       appState.doctors.unshift(item);
       saveLocalState();
       renderMain();
       showToast("Doctor added to master catalog.", "emerald");
+
+      if (isSupabaseConfigured) {
+        sb.from("doctors").insert({ name, specialty, location, tier_clinic }).select().single().then(({ data }) => {
+          if (data) item.id = data.id;
+        }).catch(() => {});
+      }
     }
 
     function openEditDoctorModal(docId) {
@@ -2349,51 +2466,56 @@
       `);
     }
 
-    async function saveMasterDoctorEdit(docId) {
+    function saveMasterDoctorEdit(docId) {
       const d = appState.doctors.find(x => x.id === docId);
       if (!d) return;
       d.name = document.getElementById("ed-doc-name").value.trim();
       d.specialty = document.getElementById("ed-doc-spec").value.trim();
       d.location = document.getElementById("ed-doc-loc").value;
       d.tier_clinic = document.getElementById("ed-doc-tier").value.trim();
-      if (isSupabaseConfigured) {
-        await sb.from("doctors").update({
-          name: d.name, specialty: d.specialty, location: d.location, tier_clinic: d.tier_clinic
-        }).eq("id", docId);
-      }
+
       saveLocalState();
       closeModal();
       renderMain();
       showToast("Doctor updated.", "emerald");
+
+      if (isSupabaseConfigured) {
+        sb.from("doctors").update({
+          name: d.name, specialty: d.specialty, location: d.location, tier_clinic: d.tier_clinic
+        }).eq("id", docId).catch(() => {});
+      }
     }
 
-    async function toggleDoctorActive(docId) {
+    function toggleDoctorActive(docId) {
       const d = appState.doctors.find(x => x.id === docId);
       if (!d) return;
       d.is_active = !d.is_active;
-      if (isSupabaseConfigured) {
-        await sb.from("doctors").update({ is_active: d.is_active }).eq("id", docId);
-      }
       saveLocalState();
       renderMain();
       showToast(d.is_active ? "Doctor restored." : "Doctor archived.", "indigo");
+
+      if (isSupabaseConfigured) {
+        sb.from("doctors").update({ is_active: d.is_active }).eq("id", docId).catch(() => {});
+      }
     }
 
-    async function addMasterSample() {
+    function addMasterSample() {
       const name = document.getElementById("new-smp-name").value.trim();
       const unit = document.getElementById("new-smp-unit").value.trim() || "Packs";
       const category = document.getElementById("new-smp-cat").value.trim() || "General";
       if (!name) return showToast("Enter sample name.", "amber");
 
       const item = { id: uid("smp"), name, unit, category, office_total_taken: 0, is_active: true };
-      if (isSupabaseConfigured) {
-        const { data } = await sb.from("samples").insert({ name, unit, category }).select().single();
-        if (data) item.id = data.id;
-      }
       appState.samples.unshift(item);
       saveLocalState();
       renderMain();
       showToast("Sample added to master catalog.", "emerald");
+
+      if (isSupabaseConfigured) {
+        sb.from("samples").insert({ name, unit, category }).select().single().then(({ data }) => {
+          if (data) item.id = data.id;
+        }).catch(() => {});
+      }
     }
 
     function openEditSampleModal(smpId) {
@@ -2413,38 +2535,41 @@
       `);
     }
 
-    async function saveMasterSampleEdit(smpId) {
+    function saveMasterSampleEdit(smpId) {
       const s = appState.samples.find(x => x.id === smpId);
       if (!s) return;
       s.name = document.getElementById("ed-smp-name").value.trim();
       s.unit = document.getElementById("ed-smp-unit").value.trim();
       s.category = document.getElementById("ed-smp-cat").value.trim();
-      if (isSupabaseConfigured) {
-        await sb.from("samples").update({ name: s.name, unit: s.unit, category: s.category }).eq("id", smpId);
-      }
+
       saveLocalState();
       closeModal();
       renderMain();
       showToast("Sample updated.", "emerald");
+
+      if (isSupabaseConfigured) {
+        sb.from("samples").update({ name: s.name, unit: s.unit, category: s.category }).eq("id", smpId).catch(() => {});
+      }
     }
 
-    async function toggleSampleActive(smpId) {
+    function toggleSampleActive(smpId) {
       const s = appState.samples.find(x => x.id === smpId);
       if (!s) return;
       s.is_active = !s.is_active;
-      if (isSupabaseConfigured) {
-        await sb.from("samples").update({ is_active: s.is_active }).eq("id", smpId);
-      }
       saveLocalState();
       renderMain();
       showToast(s.is_active ? "Sample restored." : "Sample archived.", "indigo");
+
+      if (isSupabaseConfigured) {
+        sb.from("samples").update({ is_active: s.is_active }).eq("id", smpId).catch(() => {});
+      }
     }
 
     function toggleBulkCheckboxes(checked) {
       document.querySelectorAll(".bulk-doc-cb").forEach(cb => { cb.checked = checked; });
     }
 
-    async function saveBulkAssignments() {
+    function saveBulkAssignments() {
       const visibleIds = new Set(Array.from(document.querySelectorAll(".bulk-doc-cb")).map(cb => cb.value));
       const checkedIds = Array.from(document.querySelectorAll(".bulk-doc-cb:checked")).map(cb => cb.value);
 
@@ -2455,14 +2580,17 @@
         appState.doctor_assignments.push({ doctor_id: docId, member_id: bulkTargetRepId });
       });
 
-      if (isSupabaseConfigured) {
-        await sb.from("doctor_assignments").delete().eq("member_id", bulkTargetRepId).in("doctor_id", Array.from(visibleIds));
-        if (checkedIds.length > 0) {
-          await sb.from("doctor_assignments").insert(checkedIds.map(d => ({ doctor_id: d, member_id: bulkTargetRepId })));
-        }
-      }
       saveLocalState();
       showToast("Bulk doctor assignments saved.", "emerald");
+
+      if (isSupabaseConfigured) {
+        (async () => {
+          await sb.from("doctor_assignments").delete().eq("member_id", bulkTargetRepId).in("doctor_id", Array.from(visibleIds));
+          if (checkedIds.length > 0) {
+            await sb.from("doctor_assignments").insert(checkedIds.map(d => ({ doctor_id: d, member_id: bulkTargetRepId })));
+          }
+        })().catch(() => {});
+      }
     }
 
     // Supervisor Tab 3: Plans, Quota & Doctor History
@@ -2557,16 +2685,17 @@
       }
     }
 
-    async function saveScheduleRules() {
+    function saveScheduleRules() {
       const mode_name = document.getElementById("rule-mode-select").value;
       const daily_target = parseInt(document.getElementById("rule-daily").value || "12", 10);
       const weekly_target = parseInt(document.getElementById("rule-weekly").value || "60", 10);
       appState.schedule_rules = { mode_name, daily_target, weekly_target };
-      if (isSupabaseConfigured) {
-        await sb.from("schedule_rules").update({ mode_name, daily_target, weekly_target }).eq("id", 1);
-      }
       saveLocalState();
       showToast("Quota rules updated across the team.", "emerald");
+
+      if (isSupabaseConfigured) {
+        sb.from("schedule_rules").update({ mode_name, daily_target, weekly_target }).eq("id", 1).catch(() => {});
+      }
     }
 
     // Supervisor Tab 4: Requests & Variances
@@ -2643,43 +2772,46 @@
       `;
     }
 
-    async function decideVariance(varId, status) {
+    function decideVariance(varId, status) {
       const v = appState.quota_variances.find(x => x.id === varId);
       if (!v) return;
       v.status = status;
-      if (isSupabaseConfigured) {
-        await sb.from("quota_variances").update({ status }).eq("id", varId);
-      }
-      await pushNotification(v.member_id, "Quota Variances", `Your quota variance for ${v.variance_date} was ${status}.`);
       saveLocalState();
       renderMain();
       showToast(`Variance marked ${status}.`, status === "Approved" ? "emerald" : "rose");
+
+      if (isSupabaseConfigured) {
+        sb.from("quota_variances").update({ status }).eq("id", varId).catch(() => {});
+      }
+      pushNotification(v.member_id, "Quota Variances", `Your quota variance for ${v.variance_date} was ${status}.`);
     }
 
-    async function updateGiftStatus(giftId, status) {
+    function updateGiftStatus(giftId, status) {
       const g = appState.gift_requests.find(x => x.id === giftId);
       if (!g) return;
       g.status = status;
-      if (isSupabaseConfigured) {
-        await sb.from("gift_requests").update({ status }).eq("id", giftId);
-      }
-      await pushNotification(g.member_id, "Gifts & Day-Off", `Gift request (${g.gift_details}) status updated to ${status}.`);
       saveLocalState();
       renderMain();
       showToast(`Gift status: ${status}`, "indigo");
+
+      if (isSupabaseConfigured) {
+        sb.from("gift_requests").update({ status }).eq("id", giftId).catch(() => {});
+      }
+      pushNotification(g.member_id, "Gifts & Day-Off", `Gift request (${g.gift_details}) status updated to ${status}.`);
     }
 
-    async function updateDayOffStatus(dayId, status) {
+    function updateDayOffStatus(dayId, status) {
       const d = appState.day_off_requests.find(x => x.id === dayId);
       if (!d) return;
       d.status = status;
-      if (isSupabaseConfigured) {
-        await sb.from("day_off_requests").update({ status }).eq("id", dayId);
-      }
-      await pushNotification(d.member_id, "Gifts & Day-Off", `Day-off request for ${d.requested_date} is now ${status}.`);
       saveLocalState();
       renderMain();
       showToast(`Day-off status: ${status}`, "indigo");
+
+      if (isSupabaseConfigured) {
+        sb.from("day_off_requests").update({ status }).eq("id", dayId).catch(() => {});
+      }
+      pushNotification(d.member_id, "Gifts & Day-Off", `Day-off request for ${d.requested_date} is now ${status}.`);
     }
 
     // Supervisor Tab 5: Assign Tasks & Reset Demo
@@ -2736,7 +2868,7 @@
       `;
     }
 
-    async function createTask() {
+    function createTask() {
       const title = document.getElementById("task-title").value.trim();
       const scope = document.getElementById("task-scope").value;
       const priority = document.getElementById("task-priority").value;
@@ -2747,22 +2879,25 @@
       const item = {
         id: uid("task"), title, scope, priority, assigned_to, due_date, status: "Open", created_at: new Date().toISOString()
       };
-      if (isSupabaseConfigured) {
-        const { data } = await sb.from("tasks").insert({ title, scope, priority, assigned_to, due_date }).select().single();
-        if (data) item.id = data.id;
-      }
       appState.tasks.unshift(item);
-      if (assigned_to) {
-        await pushNotification(assigned_to, "Tasks", `New ${priority} priority task assigned: ${title}`);
-      }
       saveLocalState();
       renderTasksBanner();
       renderMain();
       showToast("Task published.", "emerald");
+
+      if (isSupabaseConfigured) {
+        sb.from("tasks").insert({ title, scope, priority, assigned_to, due_date }).select().single().then(({ data }) => {
+          if (data) item.id = data.id;
+        }).catch(() => {});
+      }
+      if (assigned_to) {
+        pushNotification(assigned_to, "Tasks", `New ${priority} priority task assigned: ${title}`);
+      }
     }
 
     function resetDemoState() {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(LIVE_CACHE_KEY);
       localStorage.removeItem(QUEUE_KEY);
       offlineQueue = [];
       appState = buildSeedState();
