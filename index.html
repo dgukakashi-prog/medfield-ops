@@ -1161,7 +1161,7 @@
         }).join("");
     }
 
-    function cycleTaskStatus(taskId) {
+   async function cycleTaskStatus(taskId) {
       const task = appState.tasks.find(t => t.id === taskId);
       if (!task) return;
       const order = ["Open", "In Progress", "Completed"];
@@ -1173,7 +1173,16 @@
       showToast(`Task status: ${task.status}`, "indigo");
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("tasks").update({ status: task.status }).eq("id", taskId).catch(() => {});
+        try {
+          const { error } = await sb.from("tasks").update({ status: task.status }).eq("id", taskId);
+          if (error) {
+            console.error("Failed to update task status in Supabase:", error);
+            showToast(error.message || "Could not save task status to Supabase.", "rose");
+          }
+        } catch (err) {
+          console.error("Network error updating task status:", err);
+          showToast("Network error saving task status.", "rose");
+        }
       }
       pushNotification(supervisorUser().id, "Tasks", `${currentUser().full_name} marked task "${task.title}" as ${task.status}.`);
     }
