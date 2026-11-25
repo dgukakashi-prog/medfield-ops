@@ -181,26 +181,41 @@
     // =========================================================
     // 1. SUPABASE INITIALIZATION & SERVICE WORKER
     // =========================================================
-    const isSupabaseConfigured = Boolean(
-      typeof SUPABASE_URL === "string" &&
-      SUPABASE_URL.trim() &&
-      !SUPABASE_URL.includes("YOUR_SUPABASE") &&
-      typeof SUPABASE_PUBLISHABLE_KEY === "string" &&
-      SUPABASE_PUBLISHABLE_KEY.trim() &&
-      !SUPABASE_PUBLISHABLE_KEY.includes("YOUR_SUPABASE") &&
-      window.supabase &&
-      typeof window.supabase.createClient === "function"
+    const hasSupabaseCredentials = Boolean(
+      typeof SUPABASE_URL === "string" && SUPABASE_URL.trim() && !SUPABASE_URL.includes("YOUR_SUPABASE") &&
+      typeof SUPABASE_PUBLISHABLE_KEY === "string" && SUPABASE_PUBLISHABLE_KEY.trim() && !SUPABASE_PUBLISHABLE_KEY.includes("YOUR_SUPABASE")
     );
+    const isSupabaseConfigured = Boolean(hasSupabaseCredentials && window.supabase && typeof window.supabase.createClient === "function");
+    const sb = isSupabaseConfigured ? window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY) : null;
 
-    const sb = isSupabaseConfigured
-      ? window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
-      : null;
-
+    let waitingServiceWorker = null;
+    let updateReloadRequested = false;
+    function offerServiceWorkerUpdate(registration) {
+      if (!registration?.waiting || waitingServiceWorker === registration.waiting) return;
+      waitingServiceWorker = registration.waiting;
+      const container = document.getElementById("toast-container");
+      if (!container) return;
+      const el = document.createElement("div");
+      el.className = "pointer-events-auto px-4 py-3 rounded-xl border shadow-lg text-xs font-semibold bg-slate-900 text-white border-slate-800 flex items-center justify-between gap-3";
+      const label = document.createElement("span"); label.textContent = "A MedField Ops update is ready.";
+      const button = document.createElement("button"); button.type = "button"; button.className = "underline whitespace-nowrap"; button.textContent = "Reload to update";
+      button.addEventListener("click", () => { waitingServiceWorker?.postMessage({ type: "SKIP_WAITING" }); updateReloadRequested = true; button.disabled = true; button.textContent = "Reloading…"; });
+      el.append(label, button); container.appendChild(el);
+    }
     if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => {
-        navigator.serviceWorker.register("./sw.js").catch((err) => {
-          console.warn("Service worker registration skipped:", err);
-        });
+      window.addEventListener("load", async () => {
+        try {
+          const registration = await navigator.serviceWorker.register("./sw.js");
+          offerServiceWorkerUpdate(registration);
+          registration.addEventListener("updatefound", () => {
+            const worker = registration.installing;
+            worker?.addEventListener("statechange", () => { if (worker.state === "installed") offerServiceWorkerUpdate(registration); });
+          });
+          navigator.serviceWorker.addEventListener("controllerchange", () => {
+            if (updateReloadRequested) window.location.reload();
+          });
+          registration.update().catch(() => {});
+        } catch (err) { console.warn("Service worker registration skipped:", err); }
       });
     }
 
@@ -232,6 +247,8 @@
     let timerInterval = null;
     let doctorSearchTerm = "";
     let selectedDoctorId = "";
+    let pendingOverQuotaVisit = null;
+    let isQueueSyncing = false;
     let visitTypeSelection = "Physician Visit";
     let isRealtimeSyncing = false;
     const pendingRealtimeTables = new Set();
@@ -249,8 +266,17 @@
       return `${hh}:${mm}:${ss}`;
     }
 
-    function uid(prefix = "id") {
-      return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+    function uid(_prefix = "id") {
+      if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+      // RFC 4122 v4 fallback for older browsers.
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0;
+        return (c === "x" ? r : (r & 3 | 8)).toString(16);
+      });
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
     }
 
     function isCurrentlyOffline() {
@@ -571,9 +597,17 @@
     // 3. AUTHENTICATION & DATA BOOTSTRAP
     // =========================================================
     async function bootstrap() {
-      window.addEventListener("online", () => updateSyncPill());
+      window.addEventListener("online", () => {
+        updateSyncPill();
+        if (isSupabaseConfigured && offlineQueue.length && !simulatedOffline) syncNow(true);
+      });
       window.addEventListener("offline", () => updateSyncPill());
 
+      if (hasSupabaseCredentials && !isSupabaseConfigured) {
+        document.getElementById("auth-screen")?.classList.remove("hidden");
+        showToast("Supabase client failed to load. Check your connection and reload; demo mode is disabled.", "rose");
+        return;
+      }
       if (!isSupabaseConfigured) {
         const saved = safeJsonParse(localStorage.getItem(STORAGE_KEY), null);
         appState = saved && Array.isArray(saved.profiles) && saved.profiles.length > 0
@@ -644,6 +678,11 @@
         console.error("Sign-out error:", err);
       }
       localStorage.removeItem(LIVE_CACHE_KEY);
+      localStorage.removeItem(QUEUE_KEY);
+      offlineQueue = [];
+      try {
+        if ("caches" in window) await caches.keys().then(keys => Promise.all(keys.map(key => caches.delete(key))));
+      } catch (err) { console.warn("Cache cleanup on sign-out failed:", err); }
       location.reload();
     }
 
@@ -745,8 +784,9 @@
 
     // Optimized targeted refresh for all 16 tables without full-page reloads
     async function refreshTablesBatch(tablesList) {
-      if (!sb || !appState || isRealtimeSyncing) return;
+      if (!sb || !appState) return;
       const tables = [...tablesList];
+      if (isRealtimeSyncing) { tables.forEach(name => pendingRealtimeTables.add(name)); return; }
       if (tables.length === 0) return;
 
       isRealtimeSyncing = true;
@@ -937,6 +977,11 @@
         console.error("Targeted realtime batch refresh error:", err);
       } finally {
         isRealtimeSyncing = false;
+        if (pendingRealtimeTables.size) {
+          const pending = Array.from(pendingRealtimeTables);
+          pendingRealtimeTables.clear();
+          queueMicrotask(() => refreshTablesBatch(pending));
+        }
       }
     }
 
@@ -1034,7 +1079,7 @@
         } else {
           switcherWrap.classList.remove("hidden");
           switcher.innerHTML = appState.profiles.map(p =>
-            `<option value="${p.id}" ${p.id === user.id ? "selected" : ""}>${p.role === "supervisor" ? "★ " : ""}${p.full_name} (${p.region})</option>`
+            `<option value="${p.id}" ${p.id === user.id ? "selected" : ""}>${p.role === "supervisor" ? "★ " : ""}${escapeHtml(p.full_name)} (${escapeHtml(p.region)})</option>`
           ).join("");
         }
       }
@@ -1117,37 +1162,35 @@
     // =========================================================
     function pushNotification(recipientId, category, message) {
       if (!recipientId || !appState) return;
-      const item = {
-        id: uid("notif"),
-        recipient_id: recipientId,
-        category,
-        message,
-        is_read: false,
-        created_at: new Date().toISOString()
-      };
+      const item = { id: uid("notif"), recipient_id: recipientId, category, message, is_read: false, created_at: new Date().toISOString() };
       appState.notifications.unshift(item);
       saveLocalState();
       renderNotifications();
 
-      if (isSupabaseConfigured && !isCurrentlyOffline()) {
-        (async () => {
-          const { data, error } = await runSbWrite(
-            "notifications.insert",
-            () => sb.from("notifications").insert({
-              recipient_id: recipientId,
-              category,
-              message
-            }).select()
-          );
-          if (!error && Array.isArray(data) && data[0]?.id) {
-            item.id = data[0].id;
-            saveLocalState();
-          }
-        })();
+      if (!isSupabaseConfigured) return;
+      const payload = { p_recipient_id: recipientId, p_category: category, p_message: message };
+      if (isCurrentlyOffline()) {
+        const alreadyQueued = offlineQueue.some(q => q.type === "notif_insert" && q.payload?.p_recipient_id === recipientId && q.payload?.p_category === category && q.payload?.p_message === message);
+        if (!alreadyQueued) queueOfflineAction({ type: "notif_insert", label: `Notification: ${category}`, payload });
+        return;
       }
+      (async () => {
+        const { error } = await runSbWrite("notifications.notify", () => sb.rpc("notify", payload), { notifyToast: true });
+        if (error && isRetryableSyncError(error)) queueOfflineAction({ type: "notif_insert", label: `Notification: ${category}`, payload });
+      })();
+    }
+
+    function isRetryableSyncError(error) {
+      if (!error) return false;
+      const status = Number(error.status || error.statusCode || 0);
+      const message = String(error.message || error.details || "").toLowerCase();
+      return status === 0 || status >= 500 || /network|fetch|timeout|temporar|connection|failed to reach/i.test(message);
     }
 
     function queueOfflineAction(action) {
+      if (action?.type === "notif_insert" && action.payload && !action.payload.p_recipient_id) {
+        action = { ...action, payload: { p_recipient_id: action.payload.recipient_id, p_category: action.payload.category, p_message: action.payload.message } };
+      }
       offlineQueue.push({ id: uid("q"), timestamp: new Date().toISOString(), ...action });
       saveLocalState();
       updateSyncPill();
@@ -1173,7 +1216,7 @@
           <div class="max-h-44 overflow-y-auto space-y-1.5">
             ${offlineQueue.length === 0
               ? `<p class="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-200 rounded-xl">All local actions are synced.</p>`
-              : offlineQueue.map(q => `<div class="text-xs p-2.5 rounded-lg bg-amber-50 border border-amber-200 flex justify-between"><span>${q.label}</span><span class="text-slate-500 tabular-nums">${(q.timestamp || "").slice(11, 19)}</span></div>`).join("")}
+              : offlineQueue.map(q => `<div class="text-xs p-2.5 rounded-lg bg-amber-50 border border-amber-200 flex justify-between"><span>${escapeHtml(q.label)}</span><span class="text-slate-500 tabular-nums">${(q.timestamp || "").slice(11, 19)}</span></div>`).join("")}
           </div>
         </div>
         <div class="flex justify-end gap-2">
@@ -1190,107 +1233,76 @@
       showToast(simulatedOffline ? "Simulated Offline Mode enabled." : "Back online.", simulatedOffline ? "amber" : "emerald");
     }
 
-    async function syncNow() {
-      if (simulatedOffline) {
-        return showToast("Turn off Simulated Offline Mode before syncing.", "amber");
+    async function syncNow(silent = false) {
+      if (isQueueSyncing) return;
+      if (simulatedOffline || !navigator.onLine) {
+        if (!silent) showToast(simulatedOffline ? "Turn off Simulated Offline Mode before syncing." : "No internet connection right now.", "amber");
+        return;
       }
-      if (!navigator.onLine) {
-        return showToast("No internet connection right now.", "amber");
+      if (!isSupabaseConfigured || !sb) {
+        if (!silent) showToast("Supabase is unavailable; queued actions were not changed.", "rose");
+        return;
       }
-      if (offlineQueue.length === 0) {
-        closeModal();
-        return showToast("Everything is already synced.", "emerald");
-      }
-      const user = currentUser();
-      const sup = supervisorUser();
-      const failedItems = [];
+      if (offlineQueue.length === 0) { if (!silent) { closeModal(); showToast("Everything is already synced.", "emerald"); } return; }
 
-      if (isSupabaseConfigured) {
-        for (const item of offlineQueue) {
-          if (item.type === "visit") {
-            const { error } = await runSbWrite("sync.log_visit_atomic", () => sb.rpc("log_visit_atomic", item.payload));
-            if (error) failedItems.push(item);
-          } else if (item.type === "visit_edit") {
-            const { error } = await runSbWrite("sync.visits.update", () => sb.from("visits").update(item.payload).eq("id", item.visit_id));
-            if (error) failedItems.push(item);
-          } else if (item.type === "status") {
-            const { error } = await runSbWrite("sync.profiles.update", () => sb.from("profiles").update(item.payload).eq("id", item.member_id));
-            if (error) failedItems.push(item);
-          } else if (item.type === "plan") {
-            const { error } = await runSbWrite("sync.plans.insert", () => sb.from("plans").insert(item.payload));
-            if (error) failedItems.push(item);
-          } else if (item.type === "pickup") {
-            const { error } = await runSbWrite("sync.take_samples_from_office", () => sb.rpc("take_samples_from_office", item.payload));
-            if (error) failedItems.push(item);
-          } else if (item.type === "gift") {
-            const { error } = await runSbWrite("sync.gift_requests.insert", () => sb.from("gift_requests").insert(item.payload));
-            if (error) failedItems.push(item);
-          } else if (item.type === "gift_status") {
-            const { error } = await runSbWrite("sync.gift_requests.update", () => sb.from("gift_requests").update(item.payload).eq("id", item.gift_id));
-            if (error) failedItems.push(item);
-          } else if (item.type === "day_off") {
-            const { error } = await runSbWrite("sync.day_off_requests.insert", () => sb.from("day_off_requests").insert(item.payload));
-            if (error) failedItems.push(item);
-          } else if (item.type === "day_off_status") {
-            const { error } = await runSbWrite("sync.day_off_requests.update", () => sb.from("day_off_requests").update(item.payload).eq("id", item.day_id));
-            if (error) failedItems.push(item);
-          } else if (item.type === "variance") {
-            const { error } = await runSbWrite("sync.quota_variances.insert", () => sb.from("quota_variances").insert(item.payload));
-            if (error) failedItems.push(item);
-          } else if (item.type === "variance_status") {
-            const { error } = await runSbWrite("sync.quota_variances.update", () => sb.from("quota_variances").update(item.payload).eq("id", item.var_id));
-            if (error) failedItems.push(item);
-          } else if (item.type === "task_create") {
-            const { error } = await runSbWrite("sync.tasks.insert", () => sb.from("tasks").insert(item.payload));
-            if (error) failedItems.push(item);
-          } else if (item.type === "task_status") {
-            const { error } = await runSbWrite("sync.tasks.update", () => sb.from("tasks").update(item.payload).eq("id", item.task_id));
-            if (error) failedItems.push(item);
-          } else if (item.type === "doctor_create") {
-            const { error } = await runSbWrite("sync.doctors.insert", () => sb.from("doctors").insert(item.payload));
-            if (error) failedItems.push(item);
-          } else if (item.type === "doctor_edit") {
-            const { error } = await runSbWrite("sync.doctors.update", () => sb.from("doctors").update(item.payload).eq("id", item.doc_id));
-            if (error) failedItems.push(item);
-          } else if (item.type === "sample_create") {
-            const { error } = await runSbWrite("sync.samples.insert", () => sb.from("samples").insert(item.payload));
-            if (error) failedItems.push(item);
-          } else if (item.type === "sample_edit") {
-            const { error } = await runSbWrite("sync.samples.update", () => sb.from("samples").update(item.payload).eq("id", item.smp_id));
-            if (error) failedItems.push(item);
-          } else if (item.type === "bulk_assign") {
-            const { error: delErr } = await runSbWrite("sync.doctor_assignments.delete", () => sb.from("doctor_assignments").delete().eq("member_id", item.member_id).in("doctor_id", item.visible_ids));
-            if (delErr) {
-              failedItems.push(item);
-            } else if (Array.isArray(item.checked_ids) && item.checked_ids.length > 0) {
-              const { error: insErr } = await runSbWrite("sync.doctor_assignments.insert", () => sb.from("doctor_assignments").insert(item.checked_ids.map(d => ({ doctor_id: d, member_id: item.member_id }))));
-              if (insErr) failedItems.push(item);
+      isQueueSyncing = true;
+      const batch = offlineQueue.slice();
+      const retryItems = [];
+      const permanentFailures = [];
+      try {
+        for (const item of batch) {
+          if (!navigator.onLine || simulatedOffline) { retryItems.push(item, ...batch.slice(batch.indexOf(item) + 1)); break; }
+          let result = { error: null };
+          try {
+            switch (item.type) {
+              case "visit": result = await sb.rpc("log_visit_atomic", item.payload); break;
+              case "visit_edit": result = await sb.from("visits").update(item.payload).eq("id", item.visit_id); break;
+              case "status": result = await sb.from("profiles").update(item.payload).eq("id", item.member_id); break;
+              case "plan": result = await sb.from("plans").insert(item.payload); break;
+              case "pickup": result = await sb.rpc("take_samples_from_office", item.payload); break;
+              case "gift": result = await sb.from("gift_requests").insert(item.payload); break;
+              case "gift_status": result = await sb.from("gift_requests").update(item.payload).eq("id", item.gift_id); break;
+              case "day_off": result = await sb.from("day_off_requests").insert(item.payload); break;
+              case "day_off_status": result = await sb.from("day_off_requests").update(item.payload).eq("id", item.day_id); break;
+              case "variance": result = await sb.from("quota_variances").insert(item.payload); break;
+              case "variance_status": result = await sb.from("quota_variances").update(item.payload).eq("id", item.var_id); break;
+              case "task_create": result = await sb.from("tasks").insert(item.payload); break;
+              case "task_status": result = await sb.from("tasks").update(item.payload).eq("id", item.task_id); break;
+              case "doctor_create": result = await sb.from("doctors").insert(item.payload); break;
+              case "doctor_edit": result = await sb.from("doctors").update(item.payload).eq("id", item.doc_id); break;
+              case "sample_create": result = await sb.from("samples").insert(item.payload); break;
+              case "sample_edit": result = await sb.from("samples").update(item.payload).eq("id", item.smp_id); break;
+              case "bulk_assign": {
+                const del = await sb.from("doctor_assignments").delete().eq("member_id", item.member_id).in("doctor_id", item.visible_ids);
+                if (del.error) result = del;
+                else if (Array.isArray(item.checked_ids) && item.checked_ids.length) result = await sb.from("doctor_assignments").insert(item.checked_ids.map(id => ({ doctor_id: id, member_id: item.member_id })));
+                break;
+              }
+              case "schedule_rules": result = await sb.from("schedule_rules").update(item.payload).eq("id", 1); break;
+              case "notif_insert": result = await sb.rpc("notify", item.payload); break;
+              default: result = { error: { message: `Unsupported queued action: ${item.type || "unknown"}`, code: "UNSUPPORTED_QUEUE_ACTION" } };
             }
-          } else if (item.type === "schedule_rules") {
-            const { error } = await runSbWrite("sync.schedule_rules.update", () => sb.from("schedule_rules").update(item.payload).eq("id", 1));
-            if (error) failedItems.push(item);
-          } else if (item.type === "notif_insert") {
-            const { error } = await runSbWrite("sync.notifications.insert", () => sb.from("notifications").insert(item.payload));
-            if (error) failedItems.push(item);
+          } catch (err) { result = { error: err }; }
+          if (result?.error) {
+            console.error(`[Offline sync ${item.type}]`, result.error);
+            if (isRetryableSyncError(result.error)) retryItems.push(item);
+            else permanentFailures.push({ item, error: result.error });
           }
         }
-      }
-
-      const syncedCount = offlineQueue.length - failedItems.length;
-      offlineQueue = failedItems;
-      saveLocalState();
-      updateSyncPill();
-
-      if (syncedCount > 0 && sup && user) {
-        pushNotification(sup.id, "Field Rounds", `${user.full_name} synced ${syncedCount} offline action(s).`);
-      }
-      closeModal();
-      if (failedItems.length > 0) {
-        showToast(`Synced ${syncedCount}; ${failedItems.length} failed and stayed queued.`, "amber");
-      } else {
-        showToast(`Synced ${syncedCount} queued action(s).`, "emerald");
-      }
-      renderMain();
+        offlineQueue = retryItems;
+        saveLocalState();
+        updateSyncPill();
+        const syncedCount = batch.length - retryItems.length - permanentFailures.length;
+        if (permanentFailures.length) {
+          console.warn("Discarded permanently rejected offline actions:", permanentFailures.map(x => ({ type: x.item.type, message: x.error?.message })));
+        }
+        if (!silent) {
+          closeModal();
+          if (retryItems.length) showToast(`Synced ${syncedCount}; ${retryItems.length} temporary failures remain queued.${permanentFailures.length ? ` ${permanentFailures.length} rejected action(s) were removed.` : ""}`, "amber");
+          else showToast(`Synced ${syncedCount} action(s).${permanentFailures.length ? ` ${permanentFailures.length} rejected action(s) removed.` : ""}`, permanentFailures.length ? "amber" : "emerald");
+        }
+        renderMain();
+      } finally { isQueueSyncing = false; }
     }
 
     function toggleNotifDrawer(open) {
@@ -1328,10 +1340,10 @@
         : filtered.map(n => `
           <div onclick="markNotifRead('${n.id}')" class="p-4 cursor-pointer hover:bg-slate-50 transition ${n.is_read ? "opacity-65" : "bg-indigo-50/40"}">
             <div class="flex items-center justify-between gap-2 mb-1">
-              <span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">${n.category}</span>
+              <span class="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">${escapeHtml(n.category)}</span>
               <span class="text-[11px] text-slate-400 tabular-nums">${new Date(n.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
             </div>
-            <p class="text-xs text-slate-800 font-medium">${n.message}</p>
+            <p class="text-xs text-slate-800 font-medium">${escapeHtml(n.message)}</p>
           </div>
         `).join("");
     }
@@ -1401,12 +1413,12 @@
           ${appState.allowlist.map(a => `
             <div class="px-3 py-2 flex items-center justify-between text-xs">
               <div>
-                <span class="font-semibold text-slate-900">${a.email}</span>
-                <span class="text-slate-500 ml-1">(${a.full_name} · ${a.region})</span>
+                <span class="font-semibold text-slate-900">${escapeHtml(a.email)}</span>
+                <span class="text-slate-500 ml-1">(${escapeHtml(a.full_name)} · ${escapeHtml(a.region)})</span>
               </div>
               ${isSup && a.email !== user.email
                 ? `<button onclick="removeAllowlistEmail('${a.email}')" class="text-rose-600 hover:underline font-semibold">Remove</button>`
-                : `<span class="text-[11px] font-semibold text-emerald-700">${a.role}</span>`}
+                : `<span class="text-[11px] font-semibold text-emerald-700">${escapeHtml(a.role)}</span>`}
             </div>
           `).join("")}
         </div>
@@ -1524,16 +1536,16 @@
                 </div>
                 <span class="text-[11px] text-slate-500 tabular-nums">Due ${t.due_date}</span>
               </div>
-              <p class="text-xs font-semibold text-slate-900 mb-1">${t.title}</p>
+              <p class="text-xs font-semibold text-slate-900 mb-1">${escapeHtml(t.title)}</p>
               <div class="flex items-center justify-between mt-2">
-                <span class="text-[11px] text-slate-500">${owner}</span>
+                <span class="text-[11px] text-slate-500">${escapeHtml(owner)}</span>
                 <button onclick="cycleTaskStatus('${t.id}')" class="text-[11px] font-semibold px-2.5 py-1 rounded-lg border ${
                   t.status === "Completed"
                     ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                     : t.status === "In Progress"
                     ? "bg-amber-50 text-amber-800 border-amber-200"
                     : "bg-slate-100 text-slate-700 border-slate-200"
-                }">${t.status}</button>
+                }">${escapeHtml(t.status)}</button>
               </div>
             </div>
           `;
@@ -1607,7 +1619,7 @@
               <label class="block font-semibold text-slate-700 mb-1">Team Member</label>
               <select id="pdf-member" class="w-full rounded-xl border border-slate-300 px-3 py-2">
                 <option value="ALL">All Team Members</option>
-                ${appState.profiles.filter(p => p.role === "member").map(p => `<option value="${p.id}">${p.full_name} (${p.region})</option>`).join("")}
+                ${appState.profiles.filter(p => p.role === "member").map(p => `<option value="${p.id}">${escapeHtml(p.full_name)} (${escapeHtml(p.region)})</option>`).join("")}
               </select>
             </div>
           ` : `<input type="hidden" id="pdf-member" value="${user.id}" />`}
@@ -1664,7 +1676,7 @@
               const rep = appState.profiles.find(p => p.id === v.member_id)?.full_name || "";
               const doc = appState.doctors.find(d => d.id === v.doctor_id)?.name || "";
               const smp = appState.samples.find(s => s.id === v.sample_id)?.name || "None";
-              return `<tr class="border-b border-slate-200"><td class="p-2 tabular-nums">${v.visit_date}</td><td class="p-2">${rep}</td><td class="p-2">${doc}</td><td class="p-2">${v.visit_type}</td><td class="p-2 tabular-nums">${v.sample_qty} × ${smp}</td><td class="p-2">${v.notes || ""}</td></tr>`;
+              return `<tr class="border-b border-slate-200"><td class="p-2 tabular-nums">${v.visit_date}</td><td class="p-2">${rep}</td><td class="p-2">${escapeHtml(doc)}</td><td class="p-2">${v.visit_type}</td><td class="p-2 tabular-nums">${v.sample_qty} × ${escapeHtml(smp)}</td><td class="p-2">${escapeHtml(v.notes || "")}</td></tr>`;
             }).join("")}
           </tbody>
         </table>
@@ -1741,7 +1753,7 @@
                 <div>
                   <span class="text-xs font-semibold text-slate-500">Field Round Status</span>
                   <div class="flex items-center gap-2.5 mt-1">
-                    <span class="text-xs font-bold px-3 py-1 rounded-full ${statusColors[user.live_status] || statusColors["Inactive Yet"]}">${user.live_status}</span>
+                    <span class="text-xs font-bold px-3 py-1 rounded-full ${statusColors[user.live_status] || statusColors["Inactive Yet"]}">${escapeHtml(user.live_status)}</span>
                     <span class="text-2xl font-bold text-slate-900 tabular-nums" ${user.live_status === "In the Field" && user.active_round_started_at ? `data-live-start="${user.active_round_started_at}"` : ""}>${formatDuration(elapsedSec)}</span>
                   </div>
                 </div>
@@ -1778,7 +1790,7 @@
                       selectedDoctorId === d.id
                         ? "bg-indigo-600 text-white border-indigo-600"
                         : "bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200"
-                    }">${d.name}</button>
+                    }">${escapeHtml(d.name)}</button>
                   `).join("")}
                 </div>
               </div>
@@ -1795,18 +1807,18 @@
 
               <div class="mb-3">
                 <label class="block text-xs font-semibold text-slate-700 mb-1">Search Assigned Doctor / Account</label>
-                <input type="text" value="${doctorSearchTerm}" oninput="doctorSearchTerm=this.value; renderMain();" placeholder="Type name, specialty, or city..." class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs mb-2" />
+                <input type="text" value="${escapeHtml(doctorSearchTerm)}" oninput="doctorSearchTerm=this.value; renderMain();" placeholder="Type name, specialty, or city..." class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs mb-2" />
                 <select id="visit-doctor-select" onchange="selectDoctorForVisit(this.value)" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs bg-white">
                   <option value="">-- Select Assigned Doctor (${filteredDocs.length}) --</option>
-                  ${filteredDocs.map(d => `<option value="${d.id}" ${d.id === selectedDoctorId ? "selected" : ""}>${d.name} · ${d.specialty} (${d.location})</option>`).join("")}
+                  ${filteredDocs.map(d => `<option value="${d.id}" ${d.id === selectedDoctorId ? "selected" : ""}>${escapeHtml(d.name)} · ${escapeHtml(d.specialty)} (${escapeHtml(d.location)})</option>`).join("")}
                 </select>
               </div>
 
               ${chosenDoc ? `
                 <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-200 mb-4 text-xs">
                   <div class="flex flex-wrap justify-between gap-2 font-semibold text-slate-900">
-                    <span>${chosenDoc.name} · ${chosenDoc.specialty}</span>
-                    <span class="text-indigo-700">${chosenDoc.tier_clinic}</span>
+                    <span>${escapeHtml(chosenDoc.name)} · ${escapeHtml(chosenDoc.specialty)}</span>
+                    <span class="text-indigo-700">${escapeHtml(chosenDoc.tier_clinic)}</span>
                   </div>
                   <p class="text-slate-500 mt-1 tabular-nums">
                     ${lastDocVisit
@@ -1824,7 +1836,7 @@
                     ${activeSamples.map(s => {
                       const inv = appState.member_sample_inventory.find(i => i.member_id === user.id && i.sample_id === s.id);
                       const stock = inv ? inv.stock : 0;
-                      return `<option value="${s.id}">${s.name} (Stock: ${stock} ${s.unit})</option>`;
+                      return `<option value="${s.id}">${escapeHtml(s.name)} (Stock: ${stock} ${escapeHtml(s.unit)})</option>`;
                     }).join("")}
                   </select>
                 </div>
@@ -1867,8 +1879,8 @@
                     <div class="p-3.5 rounded-xl border ${rejected ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50/60"}">
                       <div class="flex items-start justify-between gap-2">
                         <div>
-                          <p class="text-xs font-bold text-slate-900">${doc}</p>
-                          <p class="text-[11px] text-slate-500 tabular-nums">${v.visit_type} · ${v.visit_date}</p>
+                          <p class="text-xs font-bold text-slate-900">${escapeHtml(doc)}</p>
+                          <p class="text-[11px] text-slate-500 tabular-nums">${escapeHtml(v.visit_type)} · ${v.visit_date}</p>
                         </div>
                         ${editable
                           ? `<button onclick="openEditVisitModal('${v.id}')" class="text-[11px] font-semibold px-2 py-1 rounded-lg bg-white border border-slate-200 text-indigo-700 hover:bg-indigo-50 tabular-nums">Edit (${60 - ageMin}m left)</button>`
@@ -1876,9 +1888,9 @@
                       </div>
                       ${rejected ? `<span class="inline-block mt-1.5 text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-600 text-white">Rejected Variance</span>` : ""}
                       <p class="text-xs text-slate-700 mt-2 tabular-nums">
-                        ${smp && v.sample_qty > 0 ? `Sample: <strong>${v.sample_qty} ${smp.unit}</strong> ${smp.name}` : "No sample given"}
+                        ${smp && v.sample_qty > 0 ? `Sample: <strong>${v.sample_qty} ${smp.unit}</strong> ${escapeHtml(smp.name)}` : "No sample given"}
                       </p>
-                      ${v.notes ? `<p class="text-[11px] text-slate-500 mt-1">${v.notes}</p>` : ""}
+                      ${v.notes ? `<p class="text-[11px] text-slate-500 mt-1">${escapeHtml(v.notes)}</p>` : ""}
                     </div>
                   `;
                 }).join("")}
@@ -1994,6 +2006,7 @@
       const target = appState.schedule_rules.daily_target;
 
       if (dayCount + 1 > target) {
+        pendingOverQuotaVisit = { doctorId, sampleId, sampleQty, visitDate, notes };
         openModal(`
           <h3 class="text-base font-bold text-slate-900 mb-2">Daily Quota Exceeded (${dayCount + 1}/${target})</h3>
           <p class="text-xs text-slate-600 mb-3">Logging this visit exceeds your daily baseline target of <strong>${target} visits</strong>. Send a Compensation / Variance Request to the Supervisor to continue.</p>
@@ -2002,8 +2015,8 @@
           </div>
           <textarea id="over-quota-reason" rows="2" placeholder="Reason for extra visits (e.g., compensating for prior day)..." class="w-full rounded-xl border border-slate-300 p-2.5 text-xs mb-4"></textarea>
           <div class="flex justify-end gap-2">
-            <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
-            <button onclick="confirmOverQuotaVisit('${doctorId}', '${sampleId || ""}', ${sampleQty}, '${visitDate}', ${JSON.stringify(notes)})" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white">Send Variance & Log Visit</button>
+            <button onclick="pendingOverQuotaVisit = null; closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
+            <button onclick="confirmOverQuotaVisit()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-indigo-600 text-white">Send Variance & Log Visit</button>
           </div>
         `);
         return;
@@ -2012,60 +2025,45 @@
       finalizeVisitSubmission({ doctorId, sampleId, sampleQty, visitDate, notes, varianceId: null });
     }
 
-    function confirmOverQuotaVisit(doctorId, sampleId, sampleQty, visitDate, notes) {
+    async function confirmOverQuotaVisit() {
       const user = currentUser();
       const sup = supervisorUser();
-      if (!user) return;
+      if (!user || !pendingOverQuotaVisit) return;
+      const { doctorId, sampleId, sampleQty, visitDate, notes } = pendingOverQuotaVisit;
       const reason = (document.getElementById("over-quota-reason")?.value || "").trim() || "Field compensation coverage";
       const dayCount = appState.visits.filter(v => v.member_id === user.id && v.visit_date === visitDate).length + 1;
-      const variancePayload = {
-        member_id: user.id,
-        variance_date: visitDate,
-        variance_type: "over_quota",
-        visit_count: dayCount,
-        target_count: appState.schedule_rules.daily_target,
-        reason
-      };
-      const variance = {
-        id: uid("var"),
-        ...variancePayload,
-        status: "Pending",
-        created_at: new Date().toISOString()
-      };
+      const variancePayload = { member_id: user.id, variance_date: visitDate, variance_type: "over_quota", visit_count: dayCount, target_count: appState.schedule_rules.daily_target, reason };
+      const variance = { id: uid("var"), ...variancePayload, status: "Pending", created_at: new Date().toISOString() };
+      variancePayload.id = variance.id;
       appState.quota_variances.unshift(variance);
       const varMsg = `${user.full_name} requested >${appState.schedule_rules.daily_target}/day variance on ${visitDate}.`;
-      if (sup && sup.id !== user.id) pushNotification(sup.id, "Quota Variances", varMsg);
+      pendingOverQuotaVisit = null;
       closeModal();
-      finalizeVisitSubmission({
-        doctorId,
-        sampleId: sampleId || null,
-        sampleQty,
-        visitDate,
-        notes,
-        varianceId: variance.id
-      });
 
       if (isCurrentlyOffline()) {
         queueOfflineAction({ type: "variance", label: `Over-quota variance (${visitDate})`, payload: variancePayload });
-        if (sup && sup.id !== user.id) {
-          queueOfflineAction({
-            type: "notif_insert",
-            label: `Notif: Over-quota variance`,
-            payload: { recipient_id: sup.id, category: "Quota Variances", message: varMsg }
-          });
-        }
-      } else if (isSupabaseConfigured) {
-        (async () => {
-          const { data } = await runSbWrite(
-            "quota_variances.insert",
-            () => sb.from("quota_variances").insert(variancePayload).select().single()
-          );
-          if (data?.id) {
-            variance.id = data.id;
-            saveLocalState();
-          }
-        })();
+        finalizeVisitSubmission({ doctorId, sampleId: sampleId || null, sampleQty, visitDate, notes, varianceId: variance.id });
+        if (sup && sup.id !== user.id) pushNotification(sup.id, "Quota Variances", varMsg);
+        return;
       }
+
+      if (isSupabaseConfigured) {
+        const { data, error } = await runSbWrite(
+          "quota_variances.insert",
+          () => sb.from("quota_variances").insert(variancePayload).select().single(),
+          { notifyToast: true }
+        );
+        if (error || !data?.id) {
+          appState.quota_variances = appState.quota_variances.filter(v => v !== variance);
+          saveLocalState();
+          showToast("The variance request could not be saved, so the visit was not submitted. Please retry.", "rose");
+          return;
+        }
+        variance.id = data.id;
+      }
+      saveLocalState();
+      finalizeVisitSubmission({ doctorId, sampleId: sampleId || null, sampleQty, visitDate, notes, varianceId: variance.id });
+      if (sup && sup.id !== user.id) pushNotification(sup.id, "Quota Variances", varMsg);
     }
 
     function finalizeVisitSubmission({ doctorId, sampleId, sampleQty, visitDate, notes, varianceId }) {
@@ -2113,11 +2111,15 @@
         queueOfflineAction({ type: "visit", label: `Visit logged (${visitDate})`, payload: rpcPayload });
       } else if (isSupabaseConfigured) {
         (async () => {
-          await runSbWrite(
+          const { error } = await runSbWrite(
             "rpc.log_visit_atomic",
             () => sb.rpc("log_visit_atomic", rpcPayload),
             { notifyToast: true }
           );
+          if (error && isRetryableSyncError(error)) {
+            queueOfflineAction({ type: "visit", label: `Visit awaiting sync (${visitDate})`, payload: rpcPayload });
+            showToast("Visit saved locally and queued for retry.", "amber");
+          }
         })();
       }
     }
@@ -2137,7 +2139,7 @@
           </div>
           <div>
             <label class="block font-semibold text-slate-700 mb-1">Notes</label>
-            <textarea id="edit-vis-notes" rows="3" class="w-full rounded-xl border border-slate-300 p-2.5">${v.notes || ""}</textarea>
+            <textarea id="edit-vis-notes" rows="3" class="w-full rounded-xl border border-slate-300 p-2.5">${escapeHtml(v.notes || "")}</textarea>
           </div>
         </div>
         <div class="flex justify-end gap-2 mt-4">
@@ -2234,7 +2236,7 @@
             <div class="bg-white rounded-2xl border border-slate-200 p-5">
               <h3 class="text-sm font-bold text-slate-900 mb-3">My Gift & Day-Off Requests Summary</h3>
               <div class="space-y-2 text-xs">
-                ${myGifts.map(g => `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 flex justify-between"><span>Gift: <strong>${g.gift_details}</strong></span><span class="font-semibold text-indigo-700">${g.status}</span></div>`).join("")}
+                ${myGifts.map(g => `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 flex justify-between"><span>Gift: <strong>${escapeHtml(g.gift_details)}</strong></span><span class="font-semibold text-indigo-700">${escapeHtml(g.status)}</span></div>`).join("")}
                 ${myDays.map(d => `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 flex justify-between tabular-nums"><span>Day Off: <strong>${d.requested_date}</strong></span><span class="font-semibold text-amber-700">${d.status}</span></div>`).join("")}
                 ${myGifts.length + myDays.length === 0 ? `<p class="text-slate-500 py-6 text-center">No requests submitted yet.</p>` : ""}
               </div>
@@ -2381,10 +2383,10 @@
                   <div class="bg-white rounded-2xl border border-slate-200 p-5">
                     <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
                       <div>
-                        <span class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 mr-2">${p.plan_type}</span>
+                        <span class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 mr-2">${escapeHtml(p.plan_type)}</span>
                         <span class="text-sm font-bold text-slate-900">${p.plan_name}</span>
                       </div>
-                      <span class="text-xs text-slate-500 tabular-nums">Expected Entry: <strong>${p.expected_entry_time}</strong></span>
+                      <span class="text-xs text-slate-500 tabular-nums">Expected Entry: <strong>${escapeHtml(p.expected_entry_time)}</strong></span>
                     </div>
                     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3 tabular-nums">
                       <div class="p-3 rounded-xl bg-slate-50 border border-slate-200"><p class="text-[11px] text-slate-500">Planned Doctors</p><p class="text-lg font-bold">${targetIds.length}</p></div>
@@ -2512,7 +2514,7 @@
                 <div>
                   <label class="block font-semibold text-slate-700 mb-1">Sample Item</label>
                   <select id="pickup-sample-id" class="w-full rounded-xl border border-slate-300 px-3 py-2 bg-white">
-                    ${activeSamples.map(s => `<option value="${s.id}">${s.name} (${s.unit})</option>`).join("")}
+                    ${activeSamples.map(s => `<option value="${s.id}">${escapeHtml(s.name)} (${escapeHtml(s.unit)})</option>`).join("")}
                   </select>
                 </div>
                 <div>
@@ -2639,9 +2641,9 @@
                 <div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs">
                   <div class="flex justify-between font-bold">
                     <span>${g.gift_details} ($${g.estimated_price})</span>
-                    <span class="text-indigo-700">${g.status}</span>
+                    <span class="text-indigo-700">${escapeHtml(g.status)}</span>
                   </div>
-                  <p class="text-slate-500 mt-1">Buyer: ${g.buyer_role} · ${g.reason || ""}</p>
+                  <p class="text-slate-500 mt-1">Buyer: ${escapeHtml(g.buyer_role)} · ${escapeHtml(g.reason || "")}</p>
                   ${g.status === "Approved" ? (
                     g.buyer_role === "Member"
                       ? `<button onclick="markGiftBought('${g.id}')" class="mt-2 px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-semibold">Mark Bought / Done</button>`
@@ -2881,12 +2883,12 @@
                   return `
                     <div class="p-3 rounded-xl border text-xs ${rejected ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50"}">
                       <div class="flex justify-between font-bold text-slate-900">
-                        <span>${rep}</span>
+                        <span>${escapeHtml(rep)}</span>
                         <span class="text-slate-500 font-normal tabular-nums">${v.visit_date}</span>
                       </div>
                       <p class="text-indigo-700 font-semibold mt-0.5">${doc?.name || ""} (${doc?.location || ""}) · ${v.visit_type}</p>
-                      <p class="text-slate-700 mt-1 tabular-nums">${smp && v.sample_qty > 0 ? `${v.sample_qty} ${smp.unit} ${smp.name}` : "No samples"}</p>
-                      ${v.notes ? `<p class="text-slate-500 mt-1">${v.notes}</p>` : ""}
+                      <p class="text-slate-700 mt-1 tabular-nums">${smp && v.sample_qty > 0 ? `${v.sample_qty} ${smp.unit} ${escapeHtml(smp.name)}` : "No samples"}</p>
+                      ${v.notes ? `<p class="text-slate-500 mt-1">${escapeHtml(v.notes)}</p>` : ""}
                     </div>
                   `;
                 }).join("")}
@@ -2931,8 +2933,8 @@
                 ${appState.doctors.map(d => `
                   <div class="py-2.5 flex items-center justify-between gap-2 ${d.is_active ? "" : "opacity-50"}">
                     <div>
-                      <p class="font-bold text-slate-900">${d.name} ${!d.is_active ? "(Archived)" : ""}</p>
-                      <p class="text-slate-500">${d.specialty} · ${d.location} · ${d.tier_clinic}</p>
+                      <p class="font-bold text-slate-900">${escapeHtml(d.name)} ${!d.is_active ? "(Archived)" : ""}</p>
+                      <p class="text-slate-500">${escapeHtml(d.specialty)} · ${escapeHtml(d.location)} · ${escapeHtml(d.tier_clinic)}</p>
                     </div>
                     <div class="flex gap-2">
                       <button onclick="openEditDoctorModal('${d.id}')" class="text-indigo-600 hover:underline font-semibold">Edit</button>
@@ -2955,8 +2957,8 @@
                 ${appState.samples.map(s => `
                   <div class="py-2.5 flex items-center justify-between gap-2 ${s.is_active ? "" : "opacity-50"}">
                     <div>
-                      <p class="font-bold text-slate-900">${s.name} (${s.unit})</p>
-                      <p class="text-slate-500">${s.category} · Taken from Office: <strong>${s.office_total_taken}</strong></p>
+                      <p class="font-bold text-slate-900">${escapeHtml(s.name)} (${escapeHtml(s.unit)})</p>
+                      <p class="text-slate-500">${escapeHtml(s.category)} · Taken from Office: <strong>${s.office_total_taken}</strong></p>
                     </div>
                     <div class="flex gap-2">
                       <button onclick="openEditSampleModal('${s.id}')" class="text-indigo-600 hover:underline font-semibold">Edit</button>
@@ -2973,7 +2975,7 @@
               <h2 class="text-base font-bold text-slate-900">Bulk Doctor Assignment Tool</h2>
               <div class="flex flex-wrap items-center gap-2 text-xs">
                 <select onchange="bulkTargetRepId=this.value; renderMain();" class="rounded-xl border border-slate-300 px-3 py-1.5 font-semibold">
-                  ${reps.map(r => `<option value="${r.id}" ${r.id === bulkTargetRepId ? "selected" : ""}>Target Rep: ${r.full_name} (${r.region})</option>`).join("")}
+                  ${reps.map(r => `<option value="${r.id}" ${r.id === bulkTargetRepId ? "selected" : ""}>Target Rep: ${escapeHtml(r.full_name)} (${escapeHtml(r.region)})</option>`).join("")}
                 </select>
                 <select onchange="bulkFilterLoc=this.value; renderMain();" class="rounded-xl border border-slate-300 px-3 py-1.5">
                   <option value="ALL">All Locations</option>
@@ -2991,7 +2993,7 @@
               ${filteredDoctors.map(d => `
                 <label class="flex items-center gap-2 p-2.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-xs cursor-pointer">
                   <input type="checkbox" class="bulk-doc-cb" value="${d.id}" ${assignedSet.has(d.id) ? "checked" : ""} />
-                  <span><strong>${d.name}</strong><br/><span class="text-slate-500">${d.specialty} · ${d.location}</span></span>
+                  <span><strong>${escapeHtml(d.name)}</strong><br/><span class="text-slate-500">${escapeHtml(d.specialty)} · ${escapeHtml(d.location)}</span></span>
                 </label>
               `).join("")}
             </div>
@@ -3288,9 +3290,9 @@
                     const smp = appState.samples.find(s => s.id === v.sample_id)?.name || "None";
                     return `
                       <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                        <div class="flex justify-between font-bold"><span>${rep}</span><span class="tabular-nums">${v.visit_date}</span></div>
-                        <p class="text-slate-600 mt-1 tabular-nums">${v.visit_type} · ${v.sample_qty} × ${smp}</p>
-                        ${v.notes ? `<p class="text-slate-500 mt-1">${v.notes}</p>` : ""}
+                        <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">${v.visit_date}</span></div>
+                        <p class="text-slate-600 mt-1 tabular-nums">${escapeHtml(v.visit_type)} · ${v.sample_qty} × ${escapeHtml(smp)}</p>
+                        ${v.notes ? `<p class="text-slate-500 mt-1">${escapeHtml(v.notes)}</p>` : ""}
                       </div>
                     `;
                   }).join("")}
@@ -3305,8 +3307,8 @@
                   const totSmp = Object.values(p.planned_samples || {}).reduce((a, b) => a + Number(b || 0), 0);
                   return `
                     <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                      <div class="flex justify-between font-bold"><span>${rep} — ${p.plan_name}</span><span>${p.plan_type}</span></div>
-                      <p class="text-slate-600 mt-1">Entry: ${p.expected_entry_time} · Doctors: ${(p.target_doctor_ids || []).length} · Planned Office Samples: ${totSmp}</p>
+                      <div class="flex justify-between font-bold"><span>${escapeHtml(rep)} — ${escapeHtml(p.plan_name)}</span><span>${escapeHtml(p.plan_type)}</span></div>
+                      <p class="text-slate-600 mt-1">Entry: ${escapeHtml(p.expected_entry_time)} · Doctors: ${(p.target_doctor_ids || []).length} · Planned Office Samples: ${totSmp}</p>
                     </div>
                   `;
                 }).join("")}
@@ -3366,8 +3368,8 @@
                 const rep = appState.profiles.find(p => p.id === v.member_id)?.full_name || "";
                 return `
                   <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <div class="flex justify-between font-bold"><span>${rep}</span><span class="tabular-nums">${v.variance_date}</span></div>
-                    <p class="text-slate-600 mt-1 tabular-nums">${v.variance_type === "over_quota" ? ">Target" : "<Target"} (${v.visit_count}/${v.target_count}) · Status: <strong>${v.status}</strong></p>
+                    <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">${v.variance_date}</span></div>
+                    <p class="text-slate-600 mt-1 tabular-nums">${v.variance_type === "over_quota" ? ">Target" : "<Target"} (${v.visit_count}/${v.target_count}) · Status: <strong>${escapeHtml(v.status)}</strong></p>
                     <p class="text-slate-500 mt-1">${v.reason || ""}</p>
                     <div class="flex gap-2 mt-2">
                       <button onclick="decideVariance('${v.id}', 'Approved')" class="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-semibold">Approve</button>
@@ -3386,9 +3388,9 @@
                 const rep = appState.profiles.find(p => p.id === g.member_id)?.full_name || "";
                 return `
                   <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <div class="flex justify-between font-bold"><span>${rep}</span><span class="tabular-nums">$${g.estimated_price}</span></div>
-                    <p class="font-semibold text-slate-800 mt-1">${g.gift_details}</p>
-                    <p class="text-slate-500">Buyer: ${g.buyer_role} · Status: <strong>${g.status}</strong></p>
+                    <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">$${g.estimated_price}</span></div>
+                    <p class="font-semibold text-slate-800 mt-1">${escapeHtml(g.gift_details)}</p>
+                    <p class="text-slate-500">Buyer: ${escapeHtml(g.buyer_role)} · Status: <strong>${g.status}</strong></p>
                     <div class="flex flex-wrap gap-1.5 mt-2">
                       <button onclick="updateGiftStatus('${g.id}', 'Under Review')" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 font-semibold">Under Review</button>
                       <button onclick="updateGiftStatus('${g.id}', 'Approved')" class="px-2 py-1 rounded-lg bg-emerald-600 text-white font-semibold">Approve</button>
@@ -3410,8 +3412,8 @@
                 const rep = appState.profiles.find(p => p.id === d.member_id)?.full_name || "";
                 return `
                   <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <div class="flex justify-between font-bold"><span>${rep}</span><span class="tabular-nums">${d.requested_date}</span></div>
-                    <p class="text-slate-500 mt-1">${d.reason || ""} · Status: <strong>${d.status}</strong></p>
+                    <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">${d.requested_date}</span></div>
+                    <p class="text-slate-500 mt-1">${escapeHtml(d.reason || "")} · Status: <strong>${escapeHtml(d.status)}</strong></p>
                     <div class="flex gap-1.5 mt-2">
                       <button onclick="updateDayOffStatus('${d.id}', 'Under Review')" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 font-semibold">Under Review</button>
                       <button onclick="updateDayOffStatus('${d.id}', 'Approved')" class="px-2 py-1 rounded-lg bg-emerald-600 text-white font-semibold">Approve</button>
@@ -3546,7 +3548,7 @@
             </div>
             <select id="task-assignee" class="w-full rounded-xl border border-slate-300 px-3 py-2">
               <option value="">Responsible Member (for Individual)</option>
-              ${reps.map(r => `<option value="${r.id}">${r.full_name} (${r.region})</option>`).join("")}
+              ${reps.map(r => `<option value="${r.id}">${escapeHtml(r.full_name)} (${escapeHtml(r.region)})</option>`).join("")}
             </select>
             <input id="task-due" type="date" value="${todayISO()}" class="w-full rounded-xl border border-slate-300 px-3 py-2 tabular-nums" />
             <button onclick="createTask()" class="w-full py-2.5 rounded-xl bg-indigo-600 text-white font-semibold">Publish Task</button>
@@ -3566,10 +3568,10 @@
                 return `
                   <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
                     <div>
-                      <p class="font-bold text-slate-900">${t.title}</p>
+                      <p class="font-bold text-slate-900">${escapeHtml(t.title)}</p>
                       <p class="text-slate-500 mt-0.5 tabular-nums">${t.scope.toUpperCase()} · ${t.priority} · ${owner} · Due ${t.due_date}</p>
                     </div>
-                    <button onclick="cycleTaskStatus('${t.id}')" class="px-3 py-1.5 rounded-lg bg-white border border-slate-200 font-semibold">${t.status}</button>
+                    <button onclick="cycleTaskStatus('${t.id}')" class="px-3 py-1.5 rounded-lg bg-white border border-slate-200 font-semibold">${escapeHtml(t.status)}</button>
                   </div>
                 `;
               }).join("")}
