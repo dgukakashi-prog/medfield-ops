@@ -234,7 +234,8 @@
     let selectedDoctorId = "";
     let visitTypeSelection = "Physician Visit";
     let isRealtimeSyncing = false;
-    let realtimeRefreshTimer = null;
+    const pendingRealtimeTables = new Set();
+    let realtimeFlushTimer = null;
 
     function todayISO() {
       return new Date().toISOString().slice(0, 10);
@@ -252,8 +253,12 @@
       return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
     }
 
+    function isCurrentlyOffline() {
+      return Boolean(simulatedOffline || !navigator.onLine);
+    }
+
     async function runSbWrite(label, operationFn, { notifyToast = false } = {}) {
-      if (!sb || simulatedOffline || !navigator.onLine) {
+      if (!sb || isCurrentlyOffline()) {
         return { data: null, error: null, skipped: true };
       }
       try {
@@ -566,6 +571,9 @@
     // 3. AUTHENTICATION & DATA BOOTSTRAP
     // =========================================================
     async function bootstrap() {
+      window.addEventListener("online", () => updateSyncPill());
+      window.addEventListener("offline", () => updateSyncPill());
+
       if (!isSupabaseConfigured) {
         const saved = safeJsonParse(localStorage.getItem(STORAGE_KEY), null);
         appState = saved && Array.isArray(saved.profiles) && saved.profiles.length > 0
@@ -735,69 +743,213 @@
       launchAppShell();
     }
 
-    async function refreshSingleTable(tableName) {
+    // Optimized targeted refresh for all 16 tables without full-page reloads
+    async function refreshTablesBatch(tablesList) {
       if (!sb || !appState || isRealtimeSyncing) return;
+      const tables = [...tablesList];
+      if (tables.length === 0) return;
+
       isRealtimeSyncing = true;
       try {
-        switch (tableName) {
-          case "tasks": {
-            const { data, error } = await sb.from("tasks").select("id, title, scope, priority, assigned_to, due_date, status, created_at").order("created_at", { ascending: false }).limit(200);
-            if (error) console.error("Realtime tasks refresh error:", error);
-            if (data) {
-              appState.tasks = data;
-              renderTasksBanner();
-              if (currentUser()?.role === "supervisor" && activeTab === 4) renderMain();
+        const user = currentUser();
+        const isSup = user?.role === "supervisor";
+        let needHeader = false;
+        let needTasksBanner = false;
+        let needNotifs = false;
+        let needMain = false;
+
+        for (const tableName of tables) {
+          switch (tableName) {
+            case "notifications": {
+              const { data, error } = await sb.from("notifications")
+                .select("id, recipient_id, category, message, is_read, created_at")
+                .order("created_at", { ascending: false }).limit(150);
+              if (error) console.error("Realtime notifications error:", error);
+              else if (data) { appState.notifications = data; needNotifs = true; }
+              break;
             }
-            break;
-          }
-          case "notifications": {
-            const { data, error } = await sb.from("notifications").select("id, recipient_id, category, message, is_read, created_at").order("created_at", { ascending: false }).limit(150);
-            if (error) console.error("Realtime notifications refresh error:", error);
-            if (data) {
-              appState.notifications = data;
-              renderNotifications();
+            case "tasks": {
+              const { data, error } = await sb.from("tasks")
+                .select("id, title, scope, priority, assigned_to, due_date, status, created_at")
+                .order("created_at", { ascending: false }).limit(200);
+              if (error) console.error("Realtime tasks error:", error);
+              else if (data) {
+                appState.tasks = data;
+                needTasksBanner = true;
+                if (isSup && activeTab === 4) needMain = true;
+              }
+              break;
             }
-            break;
-          }
-          case "profiles": {
-            const { data, error } = await sb.from("profiles").select("id, email, member_code, full_name, role, region, live_status, active_round_started_at, last_round_duration_sec").order("member_code");
-            if (error) console.error("Realtime profiles refresh error:", error);
-            if (data) {
-              appState.profiles = data;
-              renderHeader();
-              renderMain();
+            case "profiles": {
+              const { data, error } = await sb.from("profiles")
+                .select("id, email, member_code, full_name, role, region, live_status, active_round_started_at, last_round_duration_sec")
+                .order("member_code");
+              if (error) console.error("Realtime profiles error:", error);
+              else if (data) {
+                appState.profiles = data;
+                needHeader = true;
+                if ((isSup && activeTab === 0) || (!isSup && activeTab === 0)) needMain = true;
+              }
+              break;
             }
-            break;
-          }
-          case "visits": {
-            const { data, error } = await sb.from("visits").select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at").order("created_at", { ascending: false }).limit(500);
-            if (error) console.error("Realtime visits refresh error:", error);
-            if (data) {
-              appState.visits = data;
-              renderMain();
+            case "visits": {
+              const { data, error } = await sb.from("visits")
+                .select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at")
+                .order("created_at", { ascending: false }).limit(500);
+              if (error) console.error("Realtime visits error:", error);
+              else if (data) {
+                appState.visits = data;
+                if ((isSup && (activeTab === 0 || activeTab === 2)) || (!isSup && activeTab <= 2)) needMain = true;
+              }
+              break;
             }
-            break;
-          }
-          case "doctor_assignments": {
-            const { data, error } = await sb.from("doctor_assignments").select("doctor_id, member_id");
-            if (error) console.error("Realtime doctor_assignments refresh error:", error);
-            if (data) {
-              appState.doctor_assignments = data;
-              if (currentUser()?.role === "supervisor" && activeTab === 1) renderMain();
+            case "doctors": {
+              const { data, error } = await sb.from("doctors")
+                .select("id, name, specialty, location, tier_clinic, is_active")
+                .order("name");
+              if (error) console.error("Realtime doctors error:", error);
+              else if (data) {
+                appState.doctors = data;
+                if (isSup && activeTab >= 1 && activeTab <= 2) needMain = true;
+                if (!isSup && (activeTab === 0 || activeTab === 2)) needMain = true;
+              }
+              break;
             }
-            break;
-          }
-          default: {
-            const { data: { session } } = await sb.auth.getSession();
-            if (session?.user?.email) await loadLiveSupabaseState(session.user.email, true);
+            case "doctor_assignments": {
+              const { data, error } = await sb.from("doctor_assignments")
+                .select("doctor_id, member_id");
+              if (error) console.error("Realtime doctor_assignments error:", error);
+              else if (data) {
+                appState.doctor_assignments = data;
+                if (isSup && activeTab === 1) needMain = true;
+                if (!isSup && (activeTab === 0 || activeTab === 2)) needMain = true;
+              }
+              break;
+            }
+            case "samples": {
+              const { data, error } = await sb.from("samples")
+                .select("id, name, unit, category, office_total_taken, is_active")
+                .order("name");
+              if (error) console.error("Realtime samples error:", error);
+              else if (data) {
+                appState.samples = data;
+                if ((isSup && activeTab <= 1) || (!isSup && (activeTab === 0 || activeTab === 1 || activeTab === 3))) needMain = true;
+              }
+              break;
+            }
+            case "member_sample_inventory": {
+              const { data, error } = await sb.from("member_sample_inventory")
+                .select("member_id, sample_id, stock");
+              if (error) console.error("Realtime inventory error:", error);
+              else if (data) {
+                appState.member_sample_inventory = data;
+                if (!isSup && (activeTab === 0 || activeTab === 1 || activeTab === 3)) needMain = true;
+              }
+              break;
+            }
+            case "sample_pickups": {
+              const { data, error } = await sb.from("sample_pickups")
+                .select("id, member_id, sample_id, quantity, note, created_at")
+                .order("created_at", { ascending: false }).limit(200);
+              if (error) console.error("Realtime pickups error:", error);
+              else if (data) { appState.sample_pickups = data; if (!isSup && activeTab === 3) needMain = true; }
+              break;
+            }
+            case "field_sessions": {
+              const { data, error } = await sb.from("field_sessions")
+                .select("id, member_id, started_at, ended_at, duration_sec")
+                .order("started_at", { ascending: false }).limit(200);
+              if (error) console.error("Realtime field_sessions error:", error);
+              else if (data) { appState.field_sessions = data; if (isSup && activeTab === 0) needMain = true; }
+              break;
+            }
+            case "quota_variances": {
+              const { data, error } = await sb.from("quota_variances")
+                .select("id, member_id, variance_date, variance_type, visit_count, target_count, reason, status, created_at")
+                .order("created_at", { ascending: false }).limit(200);
+              if (error) console.error("Realtime quota_variances error:", error);
+              else if (data) {
+                appState.quota_variances = data;
+                if ((isSup && (activeTab === 0 || activeTab === 3)) || (!isSup && activeTab <= 1)) needMain = true;
+              }
+              break;
+            }
+            case "plans": {
+              const { data, error } = await sb.from("plans")
+                .select("id, member_id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples, created_at")
+                .order("created_at", { ascending: false }).limit(200);
+              if (error) console.error("Realtime plans error:", error);
+              else if (data) {
+                appState.plans = data;
+                if ((isSup && activeTab === 2) || (!isSup && activeTab === 2)) needMain = true;
+              }
+              break;
+            }
+            case "gift_requests": {
+              const { data, error } = await sb.from("gift_requests")
+                .select("id, member_id, gift_details, estimated_price, buyer_role, reason, status, created_at")
+                .order("created_at", { ascending: false }).limit(200);
+              if (error) console.error("Realtime gift_requests error:", error);
+              else if (data) {
+                appState.gift_requests = data;
+                if ((isSup && activeTab === 3) || (!isSup && (activeTab === 1 || activeTab === 4))) needMain = true;
+              }
+              break;
+            }
+            case "day_off_requests": {
+              const { data, error } = await sb.from("day_off_requests")
+                .select("id, member_id, requested_date, reason, status, created_at")
+                .order("created_at", { ascending: false }).limit(200);
+              if (error) console.error("Realtime day_off_requests error:", error);
+              else if (data) {
+                appState.day_off_requests = data;
+                if ((isSup && activeTab === 3) || (!isSup && (activeTab === 1 || activeTab === 4))) needMain = true;
+              }
+              break;
+            }
+            case "schedule_rules": {
+              const { data, error } = await sb.from("schedule_rules")
+                .select("mode_name, daily_target, weekly_target")
+                .eq("id", 1).maybeSingle();
+              if (error) console.error("Realtime schedule_rules error:", error);
+              else if (data) {
+                appState.schedule_rules = data;
+                if ((isSup && (activeTab === 0 || activeTab === 2)) || (!isSup && activeTab <= 3)) needMain = true;
+              }
+              break;
+            }
+            case "allowed_emails": {
+              const { data, error } = await sb.from("allowed_emails")
+                .select("email, role, member_code, full_name, region");
+              if (error) console.error("Realtime allowed_emails error:", error);
+              else if (data) { appState.allowlist = data; }
+              break;
+            }
           }
         }
+
+        if (needHeader) renderHeader();
+        if (needTasksBanner) renderTasksBanner();
+        if (needNotifs) renderNotifications();
+        if (needMain) renderMain();
         saveLocalState();
       } catch (err) {
-        console.error("Realtime table refresh failed:", err);
+        console.error("Targeted realtime batch refresh error:", err);
       } finally {
         isRealtimeSyncing = false;
       }
+    }
+
+    function scheduleTableRefresh(tableName) {
+      if (tableName) {
+        pendingRealtimeTables.add(tableName);
+      }
+      clearTimeout(realtimeFlushTimer);
+      realtimeFlushTimer = setTimeout(() => {
+        const batch = Array.from(pendingRealtimeTables);
+        pendingRealtimeTables.clear();
+        refreshTablesBatch(batch);
+      }, 100);
     }
 
     function subscribeSupabaseRealtime() {
@@ -805,10 +957,7 @@
       sb.__medfieldChannelSubscribed = true;
       sb.channel("medfield-live")
         .on("postgres_changes", { event: "*", schema: "public" }, payload => {
-          clearTimeout(realtimeRefreshTimer);
-          realtimeRefreshTimer = setTimeout(() => {
-            refreshSingleTable(payload?.table);
-          }, 120);
+          scheduleTableRefresh(payload?.table);
         })
         .subscribe((status, err) => {
           if (status === "CHANNEL_ERROR" || err) {
@@ -897,7 +1046,7 @@
       const btn = document.getElementById("sync-status-btn");
       if (!btn) return;
       const count = offlineQueue.length;
-      if (simulatedOffline || !navigator.onLine) {
+      if (isCurrentlyOffline()) {
         btn.className = "inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-amber-50 text-amber-800 border-amber-300 tabular-nums";
         btn.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-500"></span> Offline Mode (${count})`;
       } else if (count > 0) {
@@ -980,7 +1129,7 @@
       saveLocalState();
       renderNotifications();
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isSupabaseConfigured && !isCurrentlyOffline()) {
         (async () => {
           const { data, error } = await runSbWrite(
             "notifications.insert",
@@ -1013,7 +1162,7 @@
         <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 mb-4 flex items-center justify-between">
           <div>
             <p class="text-sm font-semibold text-slate-900">Simulated Offline Mode</p>
-            <p class="text-xs text-slate-500">Queue new visits and timer actions locally when signal drops.</p>
+            <p class="text-xs text-slate-500">Queue visits, status, plans, pickups & requests when offline.</p>
           </div>
           <button onclick="toggleSimulatedOffline()" class="px-3 py-1.5 rounded-xl text-xs font-semibold ${
             simulatedOffline ? "bg-amber-500 text-slate-950" : "bg-slate-200 text-slate-800"
@@ -1045,6 +1194,9 @@
       if (simulatedOffline) {
         return showToast("Turn off Simulated Offline Mode before syncing.", "amber");
       }
+      if (!navigator.onLine) {
+        return showToast("No internet connection right now.", "amber");
+      }
       if (offlineQueue.length === 0) {
         closeModal();
         return showToast("Everything is already synced.", "emerald");
@@ -1060,6 +1212,21 @@
             if (error) failedItems.push(item);
           } else if (item.type === "status") {
             const { error } = await runSbWrite("sync.profiles.update", () => sb.from("profiles").update(item.payload).eq("id", item.member_id));
+            if (error) failedItems.push(item);
+          } else if (item.type === "plan") {
+            const { error } = await runSbWrite("sync.plans.insert", () => sb.from("plans").insert(item.payload));
+            if (error) failedItems.push(item);
+          } else if (item.type === "pickup") {
+            const { error } = await runSbWrite("sync.take_samples_from_office", () => sb.rpc("take_samples_from_office", item.payload));
+            if (error) failedItems.push(item);
+          } else if (item.type === "gift") {
+            const { error } = await runSbWrite("sync.gift_requests.insert", () => sb.from("gift_requests").insert(item.payload));
+            if (error) failedItems.push(item);
+          } else if (item.type === "day_off") {
+            const { error } = await runSbWrite("sync.day_off_requests.insert", () => sb.from("day_off_requests").insert(item.payload));
+            if (error) failedItems.push(item);
+          } else if (item.type === "variance") {
+            const { error } = await runSbWrite("sync.quota_variances.insert", () => sb.from("quota_variances").insert(item.payload));
             if (error) failedItems.push(item);
           }
         }
@@ -1131,7 +1298,7 @@
         n.is_read = true;
         saveLocalState();
         renderNotifications();
-        if (isSupabaseConfigured && !simulatedOffline) {
+        if (isSupabaseConfigured && !isCurrentlyOffline()) {
           (async () => {
             await runSbWrite("notifications.markRead", () => sb.from("notifications").update({ is_read: true }).eq("id", id));
           })();
@@ -1145,7 +1312,7 @@
       appState.notifications.forEach(n => { if (n.recipient_id === user.id) n.is_read = true; });
       saveLocalState();
       renderNotifications();
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isSupabaseConfigured && !isCurrentlyOffline()) {
         (async () => {
           await runSbWrite("notifications.markAllRead", () => sb.from("notifications").update({ is_read: true }).eq("recipient_id", user.id));
         })();
@@ -1343,7 +1510,7 @@
       if (user.role === "supervisor" && activeTab === 4) renderMain();
       showToast(`Task status: ${task.status}`, "indigo");
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isSupabaseConfigured && !isCurrentlyOffline()) {
         await runSbWrite(
           "tasks.update",
           () => sb.from("tasks").update({ status: task.status }).eq("id", taskId),
@@ -1512,9 +1679,7 @@
 
       return `
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <!-- Left Column: Timer, Quota & Visit Form -->
           <div class="lg:col-span-2 space-y-6">
-            <!-- Field Round Lifecycle & Live Timer -->
             <div class="bg-white rounded-2xl border border-slate-200 p-5">
               <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
                 <div>
@@ -1531,7 +1696,6 @@
                 </div>
               </div>
 
-              <!-- Visit Quota Tracker -->
               <div class="pt-4 border-t border-slate-100">
                 <div class="flex flex-wrap items-center justify-between gap-2 text-xs mb-2 tabular-nums">
                   <span class="font-semibold text-slate-700">Today: <strong class="text-slate-900">${metrics.daily}/${rules.daily_target}</strong></span>
@@ -1544,14 +1708,12 @@
               </div>
             </div>
 
-            <!-- Register Field Visit Form -->
             <div class="bg-white rounded-2xl border border-slate-200 p-5">
               <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
                 <h2 class="text-base font-bold text-slate-900">Register Field Visit</h2>
                 <button onclick="repeatLastVisit()" class="text-xs font-semibold px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200">↻ Repeat Last Visit</button>
               </div>
 
-              <!-- Quick Doctor Shortcuts -->
               <div class="mb-4">
                 <p class="text-[11px] font-semibold text-slate-500 mb-1.5">Quick Doctor Shortcuts</p>
                 <div class="flex flex-wrap gap-1.5">
@@ -1565,7 +1727,6 @@
                 </div>
               </div>
 
-              <!-- Visit Type Toggle -->
               <div class="grid grid-cols-2 gap-2 mb-4">
                 ${["Physician Visit", "Pharmacy Visit"].map(t => `
                   <button type="button" onclick="setVisitType('${t}')" class="py-2 rounded-xl text-xs font-semibold border transition ${
@@ -1576,7 +1737,6 @@
                 `).join("")}
               </div>
 
-              <!-- Type-Ahead Doctor Search -->
               <div class="mb-3">
                 <label class="block text-xs font-semibold text-slate-700 mb-1">Search Assigned Doctor / Account</label>
                 <input type="text" value="${doctorSearchTerm}" oninput="doctorSearchTerm=this.value; renderMain();" placeholder="Type name, specialty, or city..." class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs mb-2" />
@@ -1600,7 +1760,6 @@
                 </div>
               ` : ""}
 
-              <!-- Sample & Quantity -->
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
                 <div class="sm:col-span-2">
                   <label class="block text-xs font-semibold text-slate-700 mb-1">Sample Provided</label>
@@ -1619,7 +1778,6 @@
                 </div>
               </div>
 
-              <!-- Date & Notes -->
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
                 <div>
                   <label class="block text-xs font-semibold text-slate-700 mb-1">Visit Date</label>
@@ -1635,7 +1793,6 @@
             </div>
           </div>
 
-          <!-- Right Column: My Logged Visits -->
           <div class="bg-white rounded-2xl border border-slate-200 p-5 h-fit">
             <h2 class="text-base font-bold text-slate-900 mb-1 tabular-nums">My Logged Visits (${metrics.myVisits.length})</h2>
             <p class="text-xs text-slate-500 mb-4">Editable within 60 minutes of submission</p>
@@ -1711,7 +1868,7 @@
       renderMain();
       showToast(`Status updated: ${newStatus}`, "emerald");
 
-      if (simulatedOffline || !navigator.onLine) {
+      if (isCurrentlyOffline()) {
         queueOfflineAction({ type: "status", label: `Status → ${newStatus}`, member_id: user.id, payload });
       } else if (isSupabaseConfigured) {
         (async () => {
@@ -1794,14 +1951,17 @@
       if (!user) return;
       const reason = (document.getElementById("over-quota-reason")?.value || "").trim() || "Field compensation coverage";
       const dayCount = appState.visits.filter(v => v.member_id === user.id && v.visit_date === visitDate).length + 1;
-      const variance = {
-        id: uid("var"),
+      const variancePayload = {
         member_id: user.id,
         variance_date: visitDate,
         variance_type: "over_quota",
         visit_count: dayCount,
         target_count: appState.schedule_rules.daily_target,
-        reason,
+        reason
+      };
+      const variance = {
+        id: uid("var"),
+        ...variancePayload,
         status: "Pending",
         created_at: new Date().toISOString()
       };
@@ -1817,18 +1977,13 @@
         varianceId: variance.id
       });
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "variance", label: `Over-quota variance (${visitDate})`, payload: variancePayload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
             "quota_variances.insert",
-            () => sb.from("quota_variances").insert({
-              member_id: user.id,
-              variance_date: visitDate,
-              variance_type: "over_quota",
-              visit_count: dayCount,
-              target_count: appState.schedule_rules.daily_target,
-              reason
-            }).select().single()
+            () => sb.from("quota_variances").insert(variancePayload).select().single()
           );
           if (data?.id) {
             variance.id = data.id;
@@ -1879,7 +2034,7 @@
       renderMain();
       showToast("Field visit logged successfully.", "emerald");
 
-      if (simulatedOffline || !navigator.onLine) {
+      if (isCurrentlyOffline()) {
         queueOfflineAction({ type: "visit", label: `Visit logged (${visitDate})`, payload: rpcPayload });
       } else if (isSupabaseConfigured) {
         (async () => {
@@ -1928,7 +2083,7 @@
       renderMain();
       showToast("Visit updated.", "emerald");
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isSupabaseConfigured && !isCurrentlyOffline()) {
         (async () => {
           await runSbWrite(
             "visits.update",
@@ -2033,14 +2188,13 @@
       const reason = (document.getElementById("under-var-reason")?.value || "").trim();
       if (!reason) return showToast("Enter a reason.", "amber");
       const count = appState.visits.filter(v => v.member_id === user.id && v.visit_date === date).length;
+      const payload = {
+        member_id: user.id, variance_date: date, variance_type: "under_quota",
+        visit_count: count, target_count: appState.schedule_rules.daily_target, reason
+      };
       const item = {
         id: uid("var"),
-        member_id: user.id,
-        variance_date: date,
-        variance_type: "under_quota",
-        visit_count: count,
-        target_count: appState.schedule_rules.daily_target,
-        reason,
+        ...payload,
         status: "Pending",
         created_at: new Date().toISOString()
       };
@@ -2049,14 +2203,13 @@
       closeModal();
       showToast("Variance request sent to Supervisor.", "emerald");
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "variance", label: `Under-quota variance (${date})`, payload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
             "quota_variances.under_quota.insert",
-            () => sb.from("quota_variances").insert({
-              member_id: user.id, variance_date: date, variance_type: "under_quota",
-              visit_count: count, target_count: appState.schedule_rules.daily_target, reason
-            }).select().single(),
+            () => sb.from("quota_variances").insert(payload).select().single(),
             { notifyToast: true }
           );
           if (data?.id) {
@@ -2176,9 +2329,11 @@
       });
       if (!plan_name) return showToast("Enter a plan name.", "amber");
 
+      const payload = {
+        member_id: user.id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples
+      };
       const item = {
-        id: uid("plan"), member_id: user.id, plan_name, plan_type,
-        expected_entry_time, target_doctor_ids, planned_samples,
+        id: uid("plan"), ...payload,
         created_at: new Date().toISOString()
       };
       appState.plans.unshift(item);
@@ -2186,13 +2341,13 @@
       renderMain();
       showToast("Plan saved.", "emerald");
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "plan", label: `Plan: ${plan_name}`, payload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
             "plans.insert",
-            () => sb.from("plans").insert({
-              member_id: user.id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples
-            }).select().single(),
+            () => sb.from("plans").insert(payload).select().single(),
             { notifyToast: true }
           );
           if (data?.id) {
@@ -2208,10 +2363,18 @@
       if (!user) return;
       const last = appState.plans.find(p => p.member_id === user.id);
       if (!last) return;
+      const payload = {
+        member_id: user.id,
+        plan_name: `${last.plan_name} (Copy)`,
+        plan_type: last.plan_type,
+        expected_entry_time: last.expected_entry_time,
+        target_doctor_ids: last.target_doctor_ids,
+        planned_samples: last.planned_samples
+      };
       const copy = {
         ...last,
         id: uid("plan"),
-        plan_name: `${last.plan_name} (Copy)`,
+        ...payload,
         created_at: new Date().toISOString()
       };
       appState.plans.unshift(copy);
@@ -2219,18 +2382,13 @@
       renderMain();
       showToast("Duplicated last plan.", "indigo");
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "plan", label: `Duplicate plan: ${payload.plan_name}`, payload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
             "plans.duplicate",
-            () => sb.from("plans").insert({
-              member_id: user.id,
-              plan_name: copy.plan_name,
-              plan_type: copy.plan_type,
-              expected_entry_time: copy.expected_entry_time,
-              target_doctor_ids: copy.target_doctor_ids,
-              planned_samples: copy.planned_samples
-            }).select().single(),
+            () => sb.from("plans").insert(payload).select().single(),
             { notifyToast: true }
           );
           if (data?.id) {
@@ -2340,17 +2498,19 @@
         id: uid("pick"), member_id: user.id, sample_id: sampleId, quantity: qty, note, created_at: new Date().toISOString()
       });
 
+      const rpcPayload = { p_member_id: user.id, p_sample_id: sampleId, p_qty: qty, p_note: note };
+
       saveLocalState();
       renderMain();
       showToast("Office sample pickup recorded.", "emerald");
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "pickup", label: `Sample pickup (${qty} ${smp?.name || ""})`, payload: rpcPayload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "rpc.take_samples_from_office",
-            () => sb.rpc("take_samples_from_office", {
-              p_member_id: user.id, p_sample_id: sampleId, p_qty: qty, p_note: note
-            }),
+            () => sb.rpc("take_samples_from_office", rpcPayload),
             { notifyToast: true }
           );
         })();
@@ -2366,7 +2526,6 @@
 
       return `
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <!-- Gift Request -->
           <div class="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
             <h2 class="text-base font-bold text-slate-900">Request a Gift</h2>
             <div class="space-y-3 text-xs">
@@ -2399,7 +2558,6 @@
             </div>
           </div>
 
-          <!-- Day Off Request -->
           <div class="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
             <h2 class="text-base font-bold text-slate-900">Request a Day Off</h2>
             <div class="space-y-3 text-xs">
@@ -2433,22 +2591,25 @@
       const reason = (document.getElementById("gift-reason")?.value || "").trim();
       if (!gift_details) return showToast("Enter gift details.", "amber");
 
+      const payload = {
+        member_id: user.id, gift_details, estimated_price, buyer_role, reason
+      };
       const item = {
-        id: uid("gift"), member_id: user.id, gift_details, estimated_price,
-        buyer_role, reason, status: "Pending", created_at: new Date().toISOString()
+        id: uid("gift"), ...payload,
+        status: "Pending", created_at: new Date().toISOString()
       };
       appState.gift_requests.unshift(item);
       saveLocalState();
       renderMain();
       showToast("Gift request submitted.", "emerald");
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "gift", label: `Gift request: ${gift_details}`, payload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
             "gift_requests.insert",
-            () => sb.from("gift_requests").insert({
-              member_id: user.id, gift_details, estimated_price, buyer_role, reason
-            }).select().single(),
+            () => sb.from("gift_requests").insert(payload).select().single(),
             { notifyToast: true }
           );
           if (data?.id) {
@@ -2470,7 +2631,7 @@
       renderMain();
       showToast("Gift marked Bought / Done.", "emerald");
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isSupabaseConfigured && !isCurrentlyOffline()) {
         (async () => {
           await runSbWrite(
             "gift_requests.markBought",
@@ -2493,19 +2654,22 @@
       const reason = (document.getElementById("dayoff-reason")?.value || "").trim();
       if (!requested_date) return showToast("Select a date.", "amber");
 
+      const payload = { member_id: user.id, requested_date, reason };
       const item = {
-        id: uid("day"), member_id: user.id, requested_date, reason, status: "Pending", created_at: new Date().toISOString()
+        id: uid("day"), ...payload, status: "Pending", created_at: new Date().toISOString()
       };
       appState.day_off_requests.unshift(item);
       saveLocalState();
       renderMain();
       showToast("Day-off request submitted.", "emerald");
 
-      if (isSupabaseConfigured && !simulatedOffline) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "day_off", label: `Day off: ${requested_date}`, payload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
             "day_off_requests.insert",
-            () => sb.from("day_off_requests").insert({ member_id: user.id, requested_date, reason }).select().single(),
+            () => sb.from("day_off_requests").insert(payload).select().single(),
             { notifyToast: true }
           );
           if (data?.id) {
@@ -2608,7 +2772,6 @@
       `;
     }
 
-    // Supervisor Tab 2: Doctors, Samples & Bulk Assign
     let bulkTargetRepId = "";
     let bulkFilterLoc = "ALL";
     let bulkFilterSpec = "ALL";
@@ -2628,7 +2791,6 @@
       return `
         <div class="space-y-6">
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <!-- Master Doctors Manager -->
             <div class="bg-white rounded-2xl border border-slate-200 p-5">
               <h2 class="text-base font-bold text-slate-900 mb-3">Master Doctors List (Add, Edit & Archive)</h2>
               <div class="grid grid-cols-2 gap-2 mb-3 text-xs">
@@ -2656,7 +2818,6 @@
               </div>
             </div>
 
-            <!-- Master Samples Manager -->
             <div class="bg-white rounded-2xl border border-slate-200 p-5">
               <h2 class="text-base font-bold text-slate-900 mb-3">Master Samples & Office Totals</h2>
               <div class="grid grid-cols-3 gap-2 mb-3 text-xs">
@@ -2682,7 +2843,6 @@
             </div>
           </div>
 
-          <!-- Bulk Doctor Assignment Tool -->
           <div class="bg-white rounded-2xl border border-slate-200 p-5">
             <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
               <h2 class="text-base font-bold text-slate-900">Bulk Doctor Assignment Tool</h2>
@@ -2941,7 +3101,6 @@
 
       return `
         <div class="space-y-6">
-          <!-- Schedule & Quota Exception Rules -->
           <div class="bg-white rounded-2xl border border-slate-200 p-5">
             <h2 class="text-base font-bold text-slate-900 mb-3">Schedule & Quota Exception Rules</h2>
             <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
@@ -2966,7 +3125,6 @@
           </div>
 
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <!-- Doctor History Lookup -->
             <div class="bg-white rounded-2xl border border-slate-200 p-5">
               <h2 class="text-base font-bold text-slate-900 mb-3">Doctor History Lookup (Last Visit Per Employee)</h2>
               <select onchange="historyDoctorId=this.value; renderMain();" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs mb-4">
@@ -2989,7 +3147,6 @@
               </div>
             </div>
 
-            <!-- Submitted Member Plans -->
             <div class="bg-white rounded-2xl border border-slate-200 p-5">
               <h2 class="text-base font-bold text-slate-900 mb-3">Submitted Member Plans Overview</h2>
               <div class="space-y-2.5 text-xs tabular-nums">
@@ -3049,7 +3206,6 @@
     function renderSupRequests() {
       return `
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <!-- Variances -->
           <div class="bg-white rounded-2xl border border-slate-200 p-5">
             <h2 class="text-base font-bold text-slate-900 mb-3">Quota Variance Requests</h2>
             <div class="space-y-3 text-xs">
@@ -3070,7 +3226,6 @@
             </div>
           </div>
 
-          <!-- Gifts -->
           <div class="bg-white rounded-2xl border border-slate-200 p-5">
             <h2 class="text-base font-bold text-slate-900 mb-3">Gift Requests Queue</h2>
             <div class="space-y-3 text-xs">
@@ -3095,7 +3250,6 @@
             </div>
           </div>
 
-          <!-- Day-Offs -->
           <div class="bg-white rounded-2xl border border-slate-200 p-5">
             <h2 class="text-base font-bold text-slate-900 mb-3">Day-Off Requests Queue</h2>
             <div class="space-y-3 text-xs">
