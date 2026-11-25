@@ -181,33 +181,53 @@
     // =========================================================
     // 1. SUPABASE INITIALIZATION & SERVICE WORKER
     // =========================================================
-    const isSupabaseConfigured =
-      SUPABASE_URL &&
+    const isSupabaseConfigured = Boolean(
+      typeof SUPABASE_URL === "string" &&
+      SUPABASE_URL.trim() &&
       !SUPABASE_URL.includes("YOUR_SUPABASE") &&
-      SUPABASE_PUBLISHABLE_KEY &&
-      !SUPABASE_PUBLISHABLE_KEY.includes("YOUR_SUPABASE");
+      typeof SUPABASE_PUBLISHABLE_KEY === "string" &&
+      SUPABASE_PUBLISHABLE_KEY.trim() &&
+      !SUPABASE_PUBLISHABLE_KEY.includes("YOUR_SUPABASE") &&
+      window.supabase &&
+      typeof window.supabase.createClient === "function"
+    );
 
     const sb = isSupabaseConfigured
       ? window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY)
       : null;
 
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js").catch(() => {});
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js").catch((err) => {
+          console.warn("Service worker registration skipped:", err);
+        });
+      });
     }
 
     // =========================================================
-    // 2. APPLICATION STATE & SEED DATA
+    // 2. APPLICATION STATE, STORAGE & SEED DATA
     // =========================================================
     const REGIONS = ["Damascus", "Aleppo", "Homs", "Idlib", "Latakia", "Hama", "Daraa", "Tartous"];
     const STORAGE_KEY = "medfield_ops_state_v2";
     const LIVE_CACHE_KEY = "medfield_ops_live_cache_v1";
     const QUEUE_KEY = "medfield_ops_offline_queue_v2";
 
+    function safeJsonParse(raw, fallback) {
+      if (!raw) return fallback;
+      try {
+        return JSON.parse(raw);
+      } catch (err) {
+        console.warn("Corrupted localStorage JSON recovered safely:", err);
+        return fallback;
+      }
+    }
+
     let appState = null;
     let activeUserId = null;
     let activeTab = 0;
     let simulatedOffline = false;
-    let offlineQueue = JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]");
+    let offlineQueue = safeJsonParse(localStorage.getItem(QUEUE_KEY), []);
+    if (!Array.isArray(offlineQueue)) offlineQueue = [];
     let tasksBannerOpen = true;
     let timerInterval = null;
     let doctorSearchTerm = "";
@@ -221,7 +241,7 @@
     }
 
     function formatDuration(sec) {
-      const s = Math.max(0, Math.floor(sec || 0));
+      const s = Math.max(0, Math.floor(Number(sec) || 0));
       const hh = String(Math.floor(s / 3600)).padStart(2, "0");
       const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
       const ss = String(s % 60).padStart(2, "0");
@@ -230,6 +250,28 @@
 
     function uid(prefix = "id") {
       return `${prefix}_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+    }
+
+    async function runSbWrite(label, operationFn, { notifyToast = false } = {}) {
+      if (!sb || simulatedOffline || !navigator.onLine) {
+        return { data: null, error: null, skipped: true };
+      }
+      try {
+        const res = await operationFn();
+        if (res && res.error) {
+          console.error(`[Supabase ${label}]`, res.error);
+          if (notifyToast) {
+            showToast(res.error.message || `Failed to save ${label}.`, "rose");
+          }
+        }
+        return res || { data: null, error: null };
+      } catch (err) {
+        console.error(`[Network ${label}]`, err);
+        if (notifyToast) {
+          showToast(`Network error during ${label}.`, "rose");
+        }
+        return { data: null, error: err };
+      }
     }
 
     function buildSeedState() {
@@ -471,17 +513,29 @@
     }
 
     function saveLocalState() {
-      if (!isSupabaseConfigured) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+      if (!isSupabaseConfigured && appState) {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+        } catch (err) {
+          console.warn("Local demo save failed:", err);
+        }
       } else if (appState) {
         try {
           localStorage.setItem(LIVE_CACHE_KEY, JSON.stringify({ state: appState, savedAt: Date.now() }));
-        } catch (_) {}
+        } catch (err) {
+          console.warn("Live cache save failed:", err);
+        }
       }
-      localStorage.setItem(QUEUE_KEY, JSON.stringify(offlineQueue));
+      try {
+        localStorage.setItem(QUEUE_KEY, JSON.stringify(offlineQueue));
+      } catch (err) {
+        console.warn("Offline queue save failed:", err);
+      }
     }
 
     function showToast(msg, tone = "indigo") {
+      const container = document.getElementById("toast-container");
+      if (!container) return;
       const colors = {
         indigo: "bg-slate-900 text-white border-slate-800",
         emerald: "bg-emerald-600 text-white border-emerald-700",
@@ -491,45 +545,62 @@
       const el = document.createElement("div");
       el.className = `pointer-events-auto px-4 py-3 rounded-xl border shadow-lg text-xs font-semibold transition ${colors[tone] || colors.indigo}`;
       el.textContent = msg;
-      document.getElementById("toast-container").appendChild(el);
-      setTimeout(() => el.remove(), 3000);
+      container.appendChild(el);
+      setTimeout(() => el.remove(), 3200);
     }
 
     function openModal(html) {
-      document.getElementById("modal-box").innerHTML = html;
-      document.getElementById("modal-backdrop").classList.remove("hidden");
+      const box = document.getElementById("modal-box");
+      const backdrop = document.getElementById("modal-backdrop");
+      if (!box || !backdrop) return;
+      box.innerHTML = html;
+      backdrop.classList.remove("hidden");
     }
 
     function closeModal() {
-      document.getElementById("modal-backdrop").classList.add("hidden");
+      const backdrop = document.getElementById("modal-backdrop");
+      if (backdrop) backdrop.classList.add("hidden");
     }
 
     // =========================================================
-    // 3. AUTHENTICATION & DATA BOOTSTRAP (OPTIMIZED)
+    // 3. AUTHENTICATION & DATA BOOTSTRAP
     // =========================================================
     async function bootstrap() {
       if (!isSupabaseConfigured) {
-        const saved = localStorage.getItem(STORAGE_KEY);
-        appState = saved ? JSON.parse(saved) : buildSeedState();
+        const saved = safeJsonParse(localStorage.getItem(STORAGE_KEY), null);
+        appState = saved && Array.isArray(saved.profiles) && saved.profiles.length > 0
+          ? saved
+          : buildSeedState();
         saveLocalState();
         activeUserId = appState.profiles[0].id;
         launchAppShell();
         return;
       }
 
-      const { data: { session } } = await sb.auth.getSession();
-      if (!session) {
-        document.getElementById("auth-screen").classList.remove("hidden");
-        return;
+      try {
+        const { data: { session }, error } = await sb.auth.getSession();
+        if (error) {
+          console.error("getSession error:", error);
+        }
+        if (!session || !session.user) {
+          document.getElementById("auth-screen")?.classList.remove("hidden");
+          return;
+        }
+        await loadLiveSupabaseState(session.user.email);
+      } catch (err) {
+        console.error("Bootstrap error:", err);
+        document.getElementById("auth-screen")?.classList.remove("hidden");
       }
-      await loadLiveSupabaseState(session.user.email);
     }
 
     async function signInWithPresetPassword(event) {
       if (event) event.preventDefault();
-      const email = document.getElementById("auth-email-input").value.trim().toLowerCase();
-      const password = document.getElementById("auth-password-input").value;
+      const emailEl = document.getElementById("auth-email-input");
+      const passEl = document.getElementById("auth-password-input");
       const btn = document.getElementById("auth-signin-btn");
+
+      const email = (emailEl?.value || "").trim().toLowerCase();
+      const password = passEl?.value || "";
 
       if (!email || !password) {
         return showToast("Enter both your email and password.", "amber");
@@ -545,8 +616,10 @@
         if (error) {
           return showToast(error.message || "Invalid email or password.", "rose");
         }
-        await loadLiveSupabaseState(data.user.email);
+        const signedInEmail = data?.user?.email || email;
+        await loadLiveSupabaseState(signedInEmail);
       } catch (err) {
+        console.error("Sign-in error:", err);
         showToast("Unable to sign in. Please try again.", "rose");
       } finally {
         if (btn) {
@@ -557,30 +630,31 @@
     }
 
     async function signOutSupabase() {
-      if (sb) await sb.auth.signOut();
+      try {
+        if (sb) await sb.auth.signOut();
+      } catch (err) {
+        console.error("Sign-out error:", err);
+      }
       localStorage.removeItem(LIVE_CACHE_KEY);
       location.reload();
     }
 
     async function loadLiveSupabaseState(email, silent = false) {
+      if (!sb) return;
       const normalizedEmail = (email || "").trim().toLowerCase();
 
-      // Fast path: if a cached snapshot exists for this email, show the shell immediately while refreshing
       if (!silent && !appState) {
-        try {
-          const cachedRaw = localStorage.getItem(LIVE_CACHE_KEY);
-          if (cachedRaw) {
-            const cached = JSON.parse(cachedRaw);
-            const cachedMe = cached?.state?.profiles?.find(p => (p.email || "").toLowerCase() === normalizedEmail);
-            if (cachedMe && Date.now() - (cached.savedAt || 0) < 15 * 60 * 1000) {
-              appState = cached.state;
-              activeUserId = cachedMe.id;
-              document.getElementById("auth-screen").classList.add("hidden");
-              document.getElementById("signout-btn").classList.remove("hidden");
-              launchAppShell();
-            }
-          }
-        } catch (_) {}
+        const cached = safeJsonParse(localStorage.getItem(LIVE_CACHE_KEY), null);
+        const cachedMe = cached?.state?.profiles?.find(
+          p => (p.email || "").toLowerCase() === normalizedEmail
+        );
+        if (cachedMe && Date.now() - (cached.savedAt || 0) < 15 * 60 * 1000) {
+          appState = cached.state;
+          activeUserId = cachedMe.id;
+          document.getElementById("auth-screen")?.classList.add("hidden");
+          document.getElementById("signout-btn")?.classList.remove("hidden");
+          launchAppShell();
+        }
       }
 
       const [
@@ -606,34 +680,48 @@
         sb.from("schedule_rules").select("mode_name, daily_target, weekly_target").eq("id", 1).maybeSingle()
       ]);
 
-      const profiles = profRes.data || [];
+      [
+        allowRes, profRes, docRes, assignRes, smpRes, invRes,
+        pickRes, sessRes, varRes, visRes, planRes, giftRes,
+        dayRes, taskRes, notifRes, ruleRes
+      ].forEach((r, idx) => {
+        if (r && r.error) {
+          console.error(`Supabase load query #${idx} error:`, r.error);
+        }
+      });
+
+      const profiles = profRes?.data || [];
       const me = profiles.find(p => (p.email || "").toLowerCase() === normalizedEmail);
       if (!me) {
         showToast("Your email is not registered in profiles yet. Ask the Supervisor to add you.", "rose");
-        await sb.auth.signOut();
-        document.getElementById("app-shell").classList.add("hidden");
-        document.getElementById("auth-screen").classList.remove("hidden");
+        try {
+          await sb.auth.signOut();
+        } catch (err) {
+          console.error("Sign out after missing profile error:", err);
+        }
+        document.getElementById("app-shell")?.classList.add("hidden");
+        document.getElementById("auth-screen")?.classList.remove("hidden");
         return;
       }
 
       const previousActiveId = activeUserId;
       appState = {
-        schedule_rules: ruleRes.data || { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
-        allowlist: allowRes.data || [],
+        schedule_rules: ruleRes?.data || { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
+        allowlist: allowRes?.data || [],
         profiles,
-        doctors: docRes.data || [],
-        doctor_assignments: assignRes.data || [],
-        samples: smpRes.data || [],
-        member_sample_inventory: invRes.data || [],
-        sample_pickups: pickRes.data || [],
-        field_sessions: sessRes.data || [],
-        quota_variances: varRes.data || [],
-        visits: visRes.data || [],
-        plans: planRes.data || [],
-        gift_requests: giftRes.data || [],
-        day_off_requests: dayRes.data || [],
-        tasks: taskRes.data || [],
-        notifications: notifRes.data || []
+        doctors: docRes?.data || [],
+        doctor_assignments: assignRes?.data || [],
+        samples: smpRes?.data || [],
+        member_sample_inventory: invRes?.data || [],
+        sample_pickups: pickRes?.data || [],
+        field_sessions: sessRes?.data || [],
+        quota_variances: varRes?.data || [],
+        visits: visRes?.data || [],
+        plans: planRes?.data || [],
+        gift_requests: giftRes?.data || [],
+        day_off_requests: dayRes?.data || [],
+        tasks: taskRes?.data || [],
+        notifications: notifRes?.data || []
       };
 
       activeUserId = (previousActiveId && profiles.some(p => p.id === previousActiveId))
@@ -641,8 +729,8 @@
         : me.id;
 
       saveLocalState();
-      document.getElementById("auth-screen").classList.add("hidden");
-      document.getElementById("signout-btn").classList.remove("hidden");
+      document.getElementById("auth-screen")?.classList.add("hidden");
+      document.getElementById("signout-btn")?.classList.remove("hidden");
       subscribeSupabaseRealtime();
       launchAppShell();
     }
@@ -653,16 +741,18 @@
       try {
         switch (tableName) {
           case "tasks": {
-            const { data } = await sb.from("tasks").select("id, title, scope, priority, assigned_to, due_date, status, created_at").order("created_at", { ascending: false }).limit(200);
+            const { data, error } = await sb.from("tasks").select("id, title, scope, priority, assigned_to, due_date, status, created_at").order("created_at", { ascending: false }).limit(200);
+            if (error) console.error("Realtime tasks refresh error:", error);
             if (data) {
               appState.tasks = data;
               renderTasksBanner();
-              if (currentUser().role === "supervisor" && activeTab === 4) renderMain();
+              if (currentUser()?.role === "supervisor" && activeTab === 4) renderMain();
             }
             break;
           }
           case "notifications": {
-            const { data } = await sb.from("notifications").select("id, recipient_id, category, message, is_read, created_at").order("created_at", { ascending: false }).limit(150);
+            const { data, error } = await sb.from("notifications").select("id, recipient_id, category, message, is_read, created_at").order("created_at", { ascending: false }).limit(150);
+            if (error) console.error("Realtime notifications refresh error:", error);
             if (data) {
               appState.notifications = data;
               renderNotifications();
@@ -670,7 +760,8 @@
             break;
           }
           case "profiles": {
-            const { data } = await sb.from("profiles").select("id, email, member_code, full_name, role, region, live_status, active_round_started_at, last_round_duration_sec").order("member_code");
+            const { data, error } = await sb.from("profiles").select("id, email, member_code, full_name, role, region, live_status, active_round_started_at, last_round_duration_sec").order("member_code");
+            if (error) console.error("Realtime profiles refresh error:", error);
             if (data) {
               appState.profiles = data;
               renderHeader();
@@ -679,7 +770,8 @@
             break;
           }
           case "visits": {
-            const { data } = await sb.from("visits").select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at").order("created_at", { ascending: false }).limit(500);
+            const { data, error } = await sb.from("visits").select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at").order("created_at", { ascending: false }).limit(500);
+            if (error) console.error("Realtime visits refresh error:", error);
             if (data) {
               appState.visits = data;
               renderMain();
@@ -687,19 +779,22 @@
             break;
           }
           case "doctor_assignments": {
-            const { data } = await sb.from("doctor_assignments").select("doctor_id, member_id");
+            const { data, error } = await sb.from("doctor_assignments").select("doctor_id, member_id");
+            if (error) console.error("Realtime doctor_assignments refresh error:", error);
             if (data) {
               appState.doctor_assignments = data;
-              if (currentUser().role === "supervisor" && activeTab === 1) renderMain();
+              if (currentUser()?.role === "supervisor" && activeTab === 1) renderMain();
             }
             break;
           }
           default: {
             const { data: { session } } = await sb.auth.getSession();
-            if (session) await loadLiveSupabaseState(session.user.email, true);
+            if (session?.user?.email) await loadLiveSupabaseState(session.user.email, true);
           }
         }
         saveLocalState();
+      } catch (err) {
+        console.error("Realtime table refresh failed:", err);
       } finally {
         isRealtimeSyncing = false;
       }
@@ -715,23 +810,34 @@
             refreshSingleTable(payload?.table);
           }, 120);
         })
-        .subscribe();
+        .subscribe((status, err) => {
+          if (status === "CHANNEL_ERROR" || err) {
+            console.error("Realtime subscription error:", status, err);
+          }
+        });
     }
 
     // =========================================================
     // 4. SHELL RENDERING & NAVIGATION
     // =========================================================
     function currentUser() {
+      if (!appState || !Array.isArray(appState.profiles) || appState.profiles.length === 0) {
+        return null;
+      }
       return appState.profiles.find(p => p.id === activeUserId) || appState.profiles[0];
     }
 
     function supervisorUser() {
+      if (!appState || !Array.isArray(appState.profiles) || appState.profiles.length === 0) {
+        return null;
+      }
       return appState.profiles.find(p => p.role === "supervisor") || appState.profiles[0];
     }
 
     function launchAppShell() {
-      document.getElementById("app-shell").classList.remove("hidden");
-      document.getElementById("tasks-banner").classList.remove("hidden");
+      if (!currentUser()) return;
+      document.getElementById("app-shell")?.classList.remove("hidden");
+      document.getElementById("tasks-banner")?.classList.remove("hidden");
       renderHeader();
       renderTabs();
       renderMain();
@@ -746,8 +852,11 @@
         document.querySelectorAll("[data-live-start]").forEach(el => {
           const start = el.getAttribute("data-live-start");
           if (start) {
-            const diff = (Date.now() - new Date(start).getTime()) / 1000;
-            el.textContent = formatDuration(diff);
+            const parsed = Date.parse(start);
+            if (!Number.isNaN(parsed)) {
+              const diff = (Date.now() - parsed) / 1000;
+              el.textContent = formatDuration(diff);
+            }
           }
         });
       }, 1000);
@@ -755,23 +864,30 @@
 
     function renderHeader() {
       const user = currentUser();
+      if (!user) return;
       const rolePill = document.getElementById("header-role-pill");
-      rolePill.textContent = user.role === "supervisor"
-        ? "Supervisor / Admin"
-        : `Member · ${user.region}`;
+      if (rolePill) {
+        rolePill.textContent = user.role === "supervisor"
+          ? "Supervisor / Admin"
+          : `Member · ${user.region}`;
+      }
 
       const modeBadge = document.getElementById("mode-badge");
-      modeBadge.textContent = isSupabaseConfigured ? "Live Cloud" : "Local Demo";
+      if (modeBadge) {
+        modeBadge.textContent = isSupabaseConfigured ? "Live Cloud" : "Local Demo";
+      }
 
       const switcher = document.getElementById("user-switcher");
       const switcherWrap = document.getElementById("user-switcher-wrap");
-      if (isSupabaseConfigured && user.role !== "supervisor") {
-        switcherWrap.classList.add("hidden");
-      } else {
-        switcherWrap.classList.remove("hidden");
-        switcher.innerHTML = appState.profiles.map(p =>
-          `<option value="${p.id}" ${p.id === user.id ? "selected" : ""}>${p.role === "supervisor" ? "★ " : ""}${p.full_name} (${p.region})</option>`
-        ).join("");
+      if (switcher && switcherWrap) {
+        if (isSupabaseConfigured && user.role !== "supervisor") {
+          switcherWrap.classList.add("hidden");
+        } else {
+          switcherWrap.classList.remove("hidden");
+          switcher.innerHTML = appState.profiles.map(p =>
+            `<option value="${p.id}" ${p.id === user.id ? "selected" : ""}>${p.role === "supervisor" ? "★ " : ""}${p.full_name} (${p.region})</option>`
+          ).join("");
+        }
       }
 
       updateSyncPill();
@@ -779,6 +895,7 @@
 
     function updateSyncPill() {
       const btn = document.getElementById("sync-status-btn");
+      if (!btn) return;
       const count = offlineQueue.length;
       if (simulatedOffline || !navigator.onLine) {
         btn.className = "inline-flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full border bg-amber-50 text-amber-800 border-amber-300 tabular-nums";
@@ -806,11 +923,13 @@
 
     function renderTabs() {
       const user = currentUser();
+      const nav = document.getElementById("role-tabs");
+      if (!user || !nav) return;
       const tabs = user.role === "supervisor"
         ? ["Live Board & Visits", "Doctors, Samples & Bulk Assign", "Plans, Quota & Doctor History", "Requests & Variances", "Assign Tasks"]
         : ["Field & Visit Log", "My Quota & Stats", "Plans & Actuals", "Samples & Inventory", "Gifts & Day-Off"];
 
-      document.getElementById("role-tabs").innerHTML = tabs.map((label, idx) => `
+      nav.innerHTML = tabs.map((label, idx) => `
         <button onclick="selectTab(${idx})" class="px-3.5 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition ${
           activeTab === idx
             ? "bg-indigo-600 text-white shadow-xs"
@@ -828,6 +947,7 @@
     function renderMain() {
       const user = currentUser();
       const container = document.getElementById("main-content");
+      if (!user || !container) return;
       if (user.role === "supervisor") {
         if (activeTab === 0) container.innerHTML = renderSupLiveBoard();
         if (activeTab === 1) container.innerHTML = renderSupCatalogAndAssign();
@@ -847,6 +967,7 @@
     // 5. OFFLINE QUEUE, NOTIFICATIONS & ALLOWLIST
     // =========================================================
     function pushNotification(recipientId, category, message) {
+      if (!recipientId || !appState) return;
       const item = {
         id: uid("notif"),
         recipient_id: recipientId,
@@ -860,13 +981,20 @@
       renderNotifications();
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("notifications").insert({
-          recipient_id: recipientId,
-          category,
-          message
-        }).then(({ data }) => {
-          if (data && data[0]) item.id = data[0].id;
-        }).catch(() => {});
+        (async () => {
+          const { data, error } = await runSbWrite(
+            "notifications.insert",
+            () => sb.from("notifications").insert({
+              recipient_id: recipientId,
+              category,
+              message
+            }).select()
+          );
+          if (!error && Array.isArray(data) && data[0]?.id) {
+            item.id = data[0].id;
+            saveLocalState();
+          }
+        })();
       }
     }
 
@@ -896,7 +1024,7 @@
           <div class="max-h-44 overflow-y-auto space-y-1.5">
             ${offlineQueue.length === 0
               ? `<p class="text-xs text-slate-500 py-4 text-center border border-dashed border-slate-200 rounded-xl">All local actions are synced.</p>`
-              : offlineQueue.map(q => `<div class="text-xs p-2.5 rounded-lg bg-amber-50 border border-amber-200 flex justify-between"><span>${q.label}</span><span class="text-slate-500 tabular-nums">${q.timestamp.slice(11, 19)}</span></div>`).join("")}
+              : offlineQueue.map(q => `<div class="text-xs p-2.5 rounded-lg bg-amber-50 border border-amber-200 flex justify-between"><span>${q.label}</span><span class="text-slate-500 tabular-nums">${(q.timestamp || "").slice(11, 19)}</span></div>`).join("")}
           </div>
         </div>
         <div class="flex justify-end gap-2">
@@ -923,40 +1051,57 @@
       }
       const user = currentUser();
       const sup = supervisorUser();
+      const failedItems = [];
+
       if (isSupabaseConfigured) {
         for (const item of offlineQueue) {
           if (item.type === "visit") {
-            await sb.rpc("log_visit_atomic", item.payload);
+            const { error } = await runSbWrite("sync.log_visit_atomic", () => sb.rpc("log_visit_atomic", item.payload));
+            if (error) failedItems.push(item);
           } else if (item.type === "status") {
-            await sb.from("profiles").update(item.payload).eq("id", item.member_id);
+            const { error } = await runSbWrite("sync.profiles.update", () => sb.from("profiles").update(item.payload).eq("id", item.member_id));
+            if (error) failedItems.push(item);
           }
         }
       }
-      const count = offlineQueue.length;
-      offlineQueue = [];
+
+      const syncedCount = offlineQueue.length - failedItems.length;
+      offlineQueue = failedItems;
       saveLocalState();
       updateSyncPill();
-      pushNotification(sup.id, "Field Rounds", `${user.full_name} synced ${count} offline action(s).`);
+
+      if (syncedCount > 0 && sup && user) {
+        pushNotification(sup.id, "Field Rounds", `${user.full_name} synced ${syncedCount} offline action(s).`);
+      }
       closeModal();
-      showToast(`Synced ${count} queued action(s).`, "emerald");
+      if (failedItems.length > 0) {
+        showToast(`Synced ${syncedCount}; ${failedItems.length} failed and stayed queued.`, "amber");
+      } else {
+        showToast(`Synced ${syncedCount} queued action(s).`, "emerald");
+      }
       renderMain();
     }
 
     function toggleNotifDrawer(open) {
-      document.getElementById("notif-backdrop").classList.toggle("hidden", !open);
+      const backdrop = document.getElementById("notif-backdrop");
+      if (!backdrop) return;
+      backdrop.classList.toggle("hidden", !open);
       if (open) renderNotifications();
     }
 
     function renderNotifications() {
       const user = currentUser();
+      if (!user || !appState) return;
       const cat = document.getElementById("notif-filter-cat")?.value || "ALL";
       const readFilter = document.getElementById("notif-filter-read")?.value || "ALL";
       const mine = appState.notifications.filter(n => n.recipient_id === user.id);
       const unreadCount = mine.filter(n => !n.is_read).length;
 
       const badge = document.getElementById("notif-unread-badge");
-      badge.textContent = unreadCount;
-      badge.classList.toggle("hidden", unreadCount === 0);
+      if (badge) {
+        badge.textContent = unreadCount;
+        badge.classList.toggle("hidden", unreadCount === 0);
+      }
 
       const filtered = mine.filter(n => {
         if (cat !== "ALL" && n.category !== cat) return false;
@@ -987,23 +1132,29 @@
         saveLocalState();
         renderNotifications();
         if (isSupabaseConfigured && !simulatedOffline) {
-          sb.from("notifications").update({ is_read: true }).eq("id", id).catch(() => {});
+          (async () => {
+            await runSbWrite("notifications.markRead", () => sb.from("notifications").update({ is_read: true }).eq("id", id));
+          })();
         }
       }
     }
 
     function markAllNotificationsRead() {
       const user = currentUser();
+      if (!user) return;
       appState.notifications.forEach(n => { if (n.recipient_id === user.id) n.is_read = true; });
       saveLocalState();
       renderNotifications();
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("notifications").update({ is_read: true }).eq("recipient_id", user.id).catch(() => {});
+        (async () => {
+          await runSbWrite("notifications.markAllRead", () => sb.from("notifications").update({ is_read: true }).eq("recipient_id", user.id));
+        })();
       }
     }
 
     function openAllowlistModal() {
       const user = currentUser();
+      if (!user) return;
       const isSup = user.role === "supervisor";
       openModal(`
         <div class="flex items-center justify-between mb-4">
@@ -1052,9 +1203,10 @@
     }
 
     function checkAllowlistEmail() {
-      const val = document.getElementById("check-allow-input").value.trim().toLowerCase();
-      const found = appState.allowlist.find(a => a.email.toLowerCase() === val);
+      const val = (document.getElementById("check-allow-input")?.value || "").trim().toLowerCase();
+      const found = appState.allowlist.find(a => (a.email || "").toLowerCase() === val);
       const out = document.getElementById("check-allow-result");
+      if (!out) return;
       if (found) {
         out.className = "text-xs mt-1.5 font-semibold text-emerald-700";
         out.textContent = `Approved: ${found.full_name} (${found.role} · ${found.region})`;
@@ -1065,27 +1217,36 @@
     }
 
     async function addAllowlistEmail() {
-      const email = document.getElementById("new-allow-email").value.trim().toLowerCase();
-      const full_name = document.getElementById("new-allow-name").value.trim();
-      const region = document.getElementById("new-allow-region").value;
-      const role = document.getElementById("new-allow-role").value;
+      const email = (document.getElementById("new-allow-email")?.value || "").trim().toLowerCase();
+      const full_name = (document.getElementById("new-allow-name")?.value || "").trim();
+      const region = document.getElementById("new-allow-region")?.value || REGIONS[0];
+      const role = document.getElementById("new-allow-role")?.value || "member";
       if (!email || !full_name) return showToast("Enter email and full name.", "amber");
       const member_code = `REP-${String(appState.profiles.length + 1).padStart(2, "0")}`;
 
+      let createdProfile = {
+        id: uid("prof"), email, member_code, full_name, role, region,
+        live_status: "Inactive Yet", active_round_started_at: null, last_round_duration_sec: 0
+      };
+
       if (isSupabaseConfigured) {
-        const { error: e1 } = await sb.from("allowed_emails").insert({ email, role, member_code, full_name, region });
-        if (e1) return showToast(e1.message, "rose");
-        const { data: prof } = await sb.from("profiles").insert({ email, role, member_code, full_name, region }).select().single();
-        appState.profiles.push(prof || {
-          id: uid("prof"), email, member_code, full_name, role, region,
-          live_status: "Inactive Yet", active_round_started_at: null, last_round_duration_sec: 0
-        });
-      } else {
-        appState.profiles.push({
-          id: uid("prof"), email, member_code, full_name, role, region,
-          live_status: "Inactive Yet", active_round_started_at: null, last_round_duration_sec: 0
-        });
+        const { error: e1 } = await runSbWrite(
+          "allowed_emails.insert",
+          () => sb.from("allowed_emails").insert({ email, role, member_code, full_name, region }),
+          { notifyToast: true }
+        );
+        if (e1) return;
+
+        const { data: prof, error: e2 } = await runSbWrite(
+          "profiles.insert",
+          () => sb.from("profiles").insert({ email, role, member_code, full_name, region }).select().single(),
+          { notifyToast: true }
+        );
+        if (e2) return;
+        if (prof) createdProfile = prof;
       }
+
+      appState.profiles.push(createdProfile);
       appState.allowlist.push({ email, role, member_code, full_name, region });
       saveLocalState();
       showToast("Added to Gmail allowlist & team profiles.", "emerald");
@@ -1099,29 +1260,37 @@
       showToast("Removed from allowlist.", "indigo");
       openAllowlistModal();
       if (isSupabaseConfigured) {
-        sb.from("allowed_emails").delete().eq("email", email).catch(() => {});
+        (async () => {
+          await runSbWrite("allowed_emails.delete", () => sb.from("allowed_emails").delete().eq("email", email));
+        })();
       }
     }
 
     // =========================================================
-    // 6. PERSISTENT TASKS & DEADLINES BANNER (INSTANT UI)
+    // 6. PERSISTENT TASKS & DEADLINES BANNER
     // =========================================================
     function toggleTasksBanner() {
       tasksBannerOpen = !tasksBannerOpen;
-      document.getElementById("tasks-banner-body").classList.toggle("hidden", !tasksBannerOpen);
-      document.getElementById("tasks-toggle-btn").textContent = tasksBannerOpen ? "Hide" : "Show";
+      document.getElementById("tasks-banner-body")?.classList.toggle("hidden", !tasksBannerOpen);
+      const btn = document.getElementById("tasks-toggle-btn");
+      if (btn) btn.textContent = tasksBannerOpen ? "Hide" : "Show";
     }
 
     function visibleTasksForCurrentUser() {
       const user = currentUser();
+      if (!user || !appState) return [];
       if (user.role === "supervisor") return appState.tasks;
       return appState.tasks.filter(t => t.scope === "team" || t.assigned_to === user.id);
     }
 
     function renderTasksBanner() {
+      const body = document.getElementById("tasks-banner-body");
+      const countEl = document.getElementById("tasks-active-count");
+      if (!body || !countEl) return;
+
       const tasks = visibleTasksForCurrentUser();
       const openCount = tasks.filter(t => t.status !== "Completed").length;
-      document.getElementById("tasks-active-count").textContent = openCount;
+      countEl.textContent = openCount;
 
       const prioColors = {
         High: "bg-rose-50 text-rose-700 border-rose-200",
@@ -1129,7 +1298,6 @@
         Low: "bg-slate-100 text-slate-700 border-slate-200"
       };
 
-      const body = document.getElementById("tasks-banner-body");
       body.innerHTML = tasks.length === 0
         ? `<p class="text-xs text-slate-500 text-center py-4">No active tasks.</p>`
         : tasks.map(t => {
@@ -1161,37 +1329,39 @@
         }).join("");
     }
 
-  async function cycleTaskStatus(taskId) {
-  const task = appState.tasks.find(t => t.id === taskId);
-  if (!task) return;
-  const order = ["Open", "In Progress", "Completed"];
-  task.status = order[(order.indexOf(task.status) + 1) % order.length];
+    async function cycleTaskStatus(taskId) {
+      const task = appState.tasks.find(t => t.id === taskId);
+      const user = currentUser();
+      const sup = supervisorUser();
+      if (!task || !user) return;
 
-  saveLocalState();
-  renderTasksBanner();
-  if (currentUser().role === "supervisor" && activeTab === 4) renderMain();
-  showToast(`Task status: ${task.status}`, "indigo");
+      const order = ["Open", "In Progress", "Completed"];
+      task.status = order[(order.indexOf(task.status) + 1) % order.length];
 
-  if (isSupabaseConfigured && !simulatedOffline) {
-    try {
-      const { error } = await sb.from("tasks").update({ status: task.status }).eq("id", taskId);
-      if (error) {
-        console.error("Failed to update task status in Supabase:", error);
-        showToast(error.message || "Could not save task status to Supabase.", "rose");
+      saveLocalState();
+      renderTasksBanner();
+      if (user.role === "supervisor" && activeTab === 4) renderMain();
+      showToast(`Task status: ${task.status}`, "indigo");
+
+      if (isSupabaseConfigured && !simulatedOffline) {
+        await runSbWrite(
+          "tasks.update",
+          () => sb.from("tasks").update({ status: task.status }).eq("id", taskId),
+          { notifyToast: true }
+        );
       }
-    } catch (err) {
-      console.error("Network error updating task status:", err);
-      showToast("Network error saving task status.", "rose");
+
+      if (sup && sup.id !== user.id) {
+        pushNotification(sup.id, "Tasks", `${user.full_name} marked task "${task.title}" as ${task.status}.`);
+      }
     }
-  }
-  pushNotification(supervisorUser().id, "Tasks", `${currentUser().full_name} marked task "${task.title}" as ${task.status}.`);
-}
 
     // =========================================================
     // 7. FILTERED PDF REPORT EXPORT
     // =========================================================
     function openExportPdfModal() {
       const user = currentUser();
+      if (!user) return;
       const today = todayISO();
       openModal(`
         <div class="flex items-center justify-between mb-4">
@@ -1238,10 +1408,10 @@
     }
 
     function runPdfExport() {
-      const from = document.getElementById("pdf-from").value;
-      const to = document.getElementById("pdf-to").value;
-      const memberId = document.getElementById("pdf-member").value;
-      const cat = document.getElementById("pdf-cat").value;
+      const from = document.getElementById("pdf-from")?.value || "";
+      const to = document.getElementById("pdf-to")?.value || "";
+      const memberId = document.getElementById("pdf-member")?.value || "ALL";
+      const cat = document.getElementById("pdf-cat")?.value || "ALL";
 
       const visits = appState.visits.filter(v =>
         (!from || v.visit_date >= from) &&
@@ -1250,6 +1420,7 @@
       );
 
       const printArea = document.getElementById("print-report-area");
+      if (!printArea) return;
       printArea.innerHTML = `
         <div class="border-b-2 border-slate-900 pb-3 mb-4 flex justify-between items-end">
           <div>
@@ -1276,7 +1447,13 @@
         </table>
       `;
       closeModal();
-      setTimeout(() => window.print(), 150);
+      setTimeout(() => {
+        try {
+          window.print();
+        } catch (err) {
+          console.error("Print error:", err);
+        }
+      }, 150);
     }
 
     // =========================================================
@@ -1292,8 +1469,8 @@
       const myVisits = appState.visits.filter(v => v.member_id === memberId);
       const daily = myVisits.filter(v => v.visit_date === today).length;
       const weekly = myVisits.filter(v => v.visit_date >= weekAgo).length;
-      const monthly = myVisits.filter(v => v.visit_date.startsWith(monthPrefix)).length;
-      const annual = myVisits.filter(v => v.visit_date.startsWith(yearPrefix)).length;
+      const monthly = myVisits.filter(v => (v.visit_date || "").startsWith(monthPrefix)).length;
+      const annual = myVisits.filter(v => (v.visit_date || "").startsWith(yearPrefix)).length;
 
       return { myVisits, daily, weekly, monthly, annual };
     }
@@ -1501,12 +1678,13 @@
     function setFieldStatus(newStatus) {
       const user = currentUser();
       const sup = supervisorUser();
+      if (!user) return;
       const nowIso = new Date().toISOString();
 
       if (newStatus === "In the Field") {
         user.live_status = "In the Field";
         user.active_round_started_at = nowIso;
-        pushNotification(sup.id, "Field Rounds", `${user.full_name} started field round in ${user.region}.`);
+        if (sup) pushNotification(sup.id, "Field Rounds", `${user.full_name} started field round in ${user.region}.`);
       } else if (newStatus === "Finished Field") {
         const dur = user.active_round_started_at
           ? Math.floor((Date.now() - new Date(user.active_round_started_at).getTime()) / 1000)
@@ -1517,10 +1695,10 @@
         appState.field_sessions.unshift({
           id: uid("sess"), member_id: user.id, started_at: nowIso, ended_at: nowIso, duration_sec: dur
         });
-        pushNotification(sup.id, "Field Rounds", `${user.full_name} finished field round (${formatDuration(dur)}).`);
+        if (sup) pushNotification(sup.id, "Field Rounds", `${user.full_name} finished field round (${formatDuration(dur)}).`);
       } else {
         user.live_status = newStatus;
-        pushNotification(sup.id, "Field Rounds", `${user.full_name} set status to ${newStatus} at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
+        if (sup) pushNotification(sup.id, "Field Rounds", `${user.full_name} set status to ${newStatus} at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
       }
 
       const payload = {
@@ -1536,7 +1714,9 @@
       if (simulatedOffline || !navigator.onLine) {
         queueOfflineAction({ type: "status", label: `Status → ${newStatus}`, member_id: user.id, payload });
       } else if (isSupabaseConfigured) {
-        sb.from("profiles").update(payload).eq("id", user.id).catch(() => {});
+        (async () => {
+          await runSbWrite("profiles.status", () => sb.from("profiles").update(payload).eq("id", user.id), { notifyToast: true });
+        })();
       }
     }
 
@@ -1552,26 +1732,31 @@
 
     function repeatLastVisit() {
       const user = currentUser();
+      if (!user) return;
       const last = appState.visits.find(v => v.member_id === user.id);
       if (!last) return showToast("No previous visit to repeat.", "amber");
       selectedDoctorId = last.doctor_id;
       visitTypeSelection = last.visit_type;
       renderMain();
       setTimeout(() => {
-        if (last.sample_id) document.getElementById("visit-sample-select").value = last.sample_id;
-        document.getElementById("visit-sample-qty").value = last.sample_qty;
-        document.getElementById("visit-notes-input").value = last.notes || "";
+        const smpSel = document.getElementById("visit-sample-select");
+        const qtyInp = document.getElementById("visit-sample-qty");
+        const notesInp = document.getElementById("visit-notes-input");
+        if (smpSel && last.sample_id) smpSel.value = last.sample_id;
+        if (qtyInp) qtyInp.value = last.sample_qty;
+        if (notesInp) notesInp.value = last.notes || "";
       }, 20);
       showToast("Pre-filled from your last visit.", "indigo");
     }
 
     function attemptSubmitVisit() {
       const user = currentUser();
-      const doctorId = document.getElementById("visit-doctor-select").value;
-      const sampleId = document.getElementById("visit-sample-select").value || null;
-      const sampleQty = parseInt(document.getElementById("visit-sample-qty").value || "0", 10);
-      const visitDate = document.getElementById("visit-date-input").value || todayISO();
-      const notes = document.getElementById("visit-notes-input").value.trim();
+      if (!user) return;
+      const doctorId = document.getElementById("visit-doctor-select")?.value || "";
+      const sampleId = document.getElementById("visit-sample-select")?.value || null;
+      const sampleQty = parseInt(document.getElementById("visit-sample-qty")?.value || "0", 10);
+      const visitDate = document.getElementById("visit-date-input")?.value || todayISO();
+      const notes = (document.getElementById("visit-notes-input")?.value || "").trim();
 
       if (!doctorId) return showToast("Please select an assigned doctor or pharmacy.", "amber");
       if (sampleId && sampleQty > 0) {
@@ -1605,7 +1790,9 @@
 
     function confirmOverQuotaVisit(doctorId, sampleId, sampleQty, visitDate, notes) {
       const user = currentUser();
-      const reason = document.getElementById("over-quota-reason").value.trim() || "Field compensation coverage";
+      const sup = supervisorUser();
+      if (!user) return;
+      const reason = (document.getElementById("over-quota-reason")?.value || "").trim() || "Field compensation coverage";
       const dayCount = appState.visits.filter(v => v.member_id === user.id && v.visit_date === visitDate).length + 1;
       const variance = {
         id: uid("var"),
@@ -1619,7 +1806,7 @@
         created_at: new Date().toISOString()
       };
       appState.quota_variances.unshift(variance);
-      pushNotification(supervisorUser().id, "Quota Variances", `${user.full_name} requested >${appState.schedule_rules.daily_target}/day variance on ${visitDate}.`);
+      if (sup) pushNotification(sup.id, "Quota Variances", `${user.full_name} requested >${appState.schedule_rules.daily_target}/day variance on ${visitDate}.`);
       closeModal();
       finalizeVisitSubmission({
         doctorId,
@@ -1631,21 +1818,29 @@
       });
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("quota_variances").insert({
-          member_id: user.id,
-          variance_date: visitDate,
-          variance_type: "over_quota",
-          visit_count: dayCount,
-          target_count: appState.schedule_rules.daily_target,
-          reason
-        }).select().single().then(({ data }) => {
-          if (data) variance.id = data.id;
-        }).catch(() => {});
+        (async () => {
+          const { data } = await runSbWrite(
+            "quota_variances.insert",
+            () => sb.from("quota_variances").insert({
+              member_id: user.id,
+              variance_date: visitDate,
+              variance_type: "over_quota",
+              visit_count: dayCount,
+              target_count: appState.schedule_rules.daily_target,
+              reason
+            }).select().single()
+          );
+          if (data?.id) {
+            variance.id = data.id;
+            saveLocalState();
+          }
+        })();
       }
     }
 
     function finalizeVisitSubmission({ doctorId, sampleId, sampleQty, visitDate, notes, varianceId }) {
       const user = currentUser();
+      if (!user) return;
       const tempId = uid("vis");
 
       if (sampleId && sampleQty > 0) {
@@ -1687,9 +1882,13 @@
       if (simulatedOffline || !navigator.onLine) {
         queueOfflineAction({ type: "visit", label: `Visit logged (${visitDate})`, payload: rpcPayload });
       } else if (isSupabaseConfigured) {
-        sb.rpc("log_visit_atomic", rpcPayload).then(({ error }) => {
-          if (error) showToast(error.message, "rose");
-        }).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "rpc.log_visit_atomic",
+            () => sb.rpc("log_visit_atomic", rpcPayload),
+            { notifyToast: true }
+          );
+        })();
       }
     }
 
@@ -1721,8 +1920,8 @@
     function saveEditedVisit(visitId) {
       const v = appState.visits.find(x => x.id === visitId);
       if (!v) return;
-      v.visit_type = document.getElementById("edit-vis-type").value;
-      v.notes = document.getElementById("edit-vis-notes").value.trim();
+      v.visit_type = document.getElementById("edit-vis-type")?.value || v.visit_type;
+      v.notes = (document.getElementById("edit-vis-notes")?.value || "").trim();
 
       saveLocalState();
       closeModal();
@@ -1730,7 +1929,13 @@
       showToast("Visit updated.", "emerald");
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("visits").update({ visit_type: v.visit_type, notes: v.notes }).eq("id", visitId).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "visits.update",
+            () => sb.from("visits").update({ visit_type: v.visit_type, notes: v.notes }).eq("id", visitId),
+            { notifyToast: true }
+          );
+        })();
       }
     }
 
@@ -1822,8 +2027,10 @@
 
     function submitUnderQuotaVariance() {
       const user = currentUser();
-      const date = document.getElementById("under-var-date").value || todayISO();
-      const reason = document.getElementById("under-var-reason").value.trim();
+      const sup = supervisorUser();
+      if (!user) return;
+      const date = document.getElementById("under-var-date")?.value || todayISO();
+      const reason = (document.getElementById("under-var-reason")?.value || "").trim();
       if (!reason) return showToast("Enter a reason.", "amber");
       const count = appState.visits.filter(v => v.member_id === user.id && v.visit_date === date).length;
       const item = {
@@ -1843,12 +2050,22 @@
       showToast("Variance request sent to Supervisor.", "emerald");
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("quota_variances").insert({
-          member_id: user.id, variance_date: date, variance_type: "under_quota",
-          visit_count: count, target_count: appState.schedule_rules.daily_target, reason
-        }).catch(() => {});
+        (async () => {
+          const { data } = await runSbWrite(
+            "quota_variances.under_quota.insert",
+            () => sb.from("quota_variances").insert({
+              member_id: user.id, variance_date: date, variance_type: "under_quota",
+              visit_count: count, target_count: appState.schedule_rules.daily_target, reason
+            }).select().single(),
+            { notifyToast: true }
+          );
+          if (data?.id) {
+            item.id = data.id;
+            saveLocalState();
+          }
+        })();
       }
-      pushNotification(supervisorUser().id, "Quota Variances", `${user.full_name} submitted a <${appState.schedule_rules.daily_target}/day variance for ${date}.`);
+      if (sup) pushNotification(sup.id, "Quota Variances", `${user.full_name} submitted a <${appState.schedule_rules.daily_target}/day variance for ${date}.`);
     }
 
     // Tab 3: Plans & Actuals
@@ -1915,7 +2132,7 @@
             ${myPlans.length === 0
               ? `<div class="bg-white rounded-2xl border border-slate-200 p-8 text-center text-xs text-slate-500">No plans created yet.</div>`
               : myPlans.map(p => {
-                const targetIds = p.target_doctor_ids || [];
+                const targetIds = Array.isArray(p.target_doctor_ids) ? p.target_doctor_ids : [];
                 const completedCount = targetIds.filter(id => visitedDocIds.has(id)).length;
                 const rolloverIds = targetIds.filter(id => !visitedDocIds.has(id));
                 const rolloverNames = rolloverIds.map(id => appState.doctors.find(d => d.id === id)?.name || id);
@@ -1947,9 +2164,10 @@
 
     function saveNewPlan() {
       const user = currentUser();
-      const plan_name = document.getElementById("plan-name").value.trim();
-      const plan_type = document.getElementById("plan-type").value;
-      const expected_entry_time = document.getElementById("plan-entry-time").value || "08:30";
+      if (!user) return;
+      const plan_name = (document.getElementById("plan-name")?.value || "").trim();
+      const plan_type = document.getElementById("plan-type")?.value || "Weekly";
+      const expected_entry_time = document.getElementById("plan-entry-time")?.value || "08:30";
       const target_doctor_ids = Array.from(document.querySelectorAll(".plan-doc-cb:checked")).map(cb => cb.value);
       const planned_samples = {};
       document.querySelectorAll("[data-plan-sample]").forEach(inp => {
@@ -1969,14 +2187,25 @@
       showToast("Plan saved.", "emerald");
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("plans").insert({
-          member_id: user.id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples
-        }).catch(() => {});
+        (async () => {
+          const { data } = await runSbWrite(
+            "plans.insert",
+            () => sb.from("plans").insert({
+              member_id: user.id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples
+            }).select().single(),
+            { notifyToast: true }
+          );
+          if (data?.id) {
+            item.id = data.id;
+            saveLocalState();
+          }
+        })();
       }
     }
 
     function duplicateLastPlan() {
       const user = currentUser();
+      if (!user) return;
       const last = appState.plans.find(p => p.member_id === user.id);
       if (!last) return;
       const copy = {
@@ -1991,14 +2220,24 @@
       showToast("Duplicated last plan.", "indigo");
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("plans").insert({
-          member_id: user.id,
-          plan_name: copy.plan_name,
-          plan_type: copy.plan_type,
-          expected_entry_time: copy.expected_entry_time,
-          target_doctor_ids: copy.target_doctor_ids,
-          planned_samples: copy.planned_samples
-        }).catch(() => {});
+        (async () => {
+          const { data } = await runSbWrite(
+            "plans.duplicate",
+            () => sb.from("plans").insert({
+              member_id: user.id,
+              plan_name: copy.plan_name,
+              plan_type: copy.plan_type,
+              expected_entry_time: copy.expected_entry_time,
+              target_doctor_ids: copy.target_doctor_ids,
+              planned_samples: copy.planned_samples
+            }).select().single(),
+            { notifyToast: true }
+          );
+          if (data?.id) {
+            copy.id = data.id;
+            saveLocalState();
+          }
+        })();
       }
     }
 
@@ -2080,9 +2319,11 @@
 
     function takeSamplesFromOffice() {
       const user = currentUser();
-      const sampleId = document.getElementById("pickup-sample-id").value;
-      const qty = parseInt(document.getElementById("pickup-qty").value || "0", 10);
-      const note = document.getElementById("pickup-note").value.trim();
+      const sup = supervisorUser();
+      if (!user) return;
+      const sampleId = document.getElementById("pickup-sample-id")?.value || "";
+      const qty = parseInt(document.getElementById("pickup-qty")?.value || "0", 10);
+      const note = (document.getElementById("pickup-note")?.value || "").trim();
       if (!sampleId || qty <= 0) return showToast("Enter a valid quantity.", "amber");
 
       let inv = appState.member_sample_inventory.find(i => i.member_id === user.id && i.sample_id === sampleId);
@@ -2093,7 +2334,7 @@
       inv.stock += qty;
 
       const smp = appState.samples.find(s => s.id === sampleId);
-      if (smp) smp.office_total_taken += qty;
+      if (smp) smp.office_total_taken = (smp.office_total_taken || 0) + qty;
 
       appState.sample_pickups.unshift({
         id: uid("pick"), member_id: user.id, sample_id: sampleId, quantity: qty, note, created_at: new Date().toISOString()
@@ -2104,11 +2345,17 @@
       showToast("Office sample pickup recorded.", "emerald");
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.rpc("take_samples_from_office", {
-          p_member_id: user.id, p_sample_id: sampleId, p_qty: qty, p_note: note
-        }).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "rpc.take_samples_from_office",
+            () => sb.rpc("take_samples_from_office", {
+              p_member_id: user.id, p_sample_id: sampleId, p_qty: qty, p_note: note
+            }),
+            { notifyToast: true }
+          );
+        })();
       }
-      pushNotification(supervisorUser().id, "Field Rounds", `${user.full_name} took ${qty} ${smp?.unit || "units"} of ${smp?.name} from office.`);
+      if (sup) pushNotification(sup.id, "Field Rounds", `${user.full_name} took ${qty} ${smp?.unit || "units"} of ${smp?.name || "sample"} from office.`);
     }
 
     // Tab 5: Gifts & Day-Off
@@ -2178,10 +2425,12 @@
 
     function submitGiftRequest() {
       const user = currentUser();
-      const gift_details = document.getElementById("gift-details").value.trim();
-      const estimated_price = parseFloat(document.getElementById("gift-price").value || "0");
-      const buyer_role = document.getElementById("gift-buyer").value;
-      const reason = document.getElementById("gift-reason").value.trim();
+      const sup = supervisorUser();
+      if (!user) return;
+      const gift_details = (document.getElementById("gift-details")?.value || "").trim();
+      const estimated_price = parseFloat(document.getElementById("gift-price")?.value || "0") || 0;
+      const buyer_role = document.getElementById("gift-buyer")?.value || "Member";
+      const reason = (document.getElementById("gift-reason")?.value || "").trim();
       if (!gift_details) return showToast("Enter gift details.", "amber");
 
       const item = {
@@ -2194,32 +2443,54 @@
       showToast("Gift request submitted.", "emerald");
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("gift_requests").insert({
-          member_id: user.id, gift_details, estimated_price, buyer_role, reason
-        }).catch(() => {});
+        (async () => {
+          const { data } = await runSbWrite(
+            "gift_requests.insert",
+            () => sb.from("gift_requests").insert({
+              member_id: user.id, gift_details, estimated_price, buyer_role, reason
+            }).select().single(),
+            { notifyToast: true }
+          );
+          if (data?.id) {
+            item.id = data.id;
+            saveLocalState();
+          }
+        })();
       }
-      pushNotification(supervisorUser().id, "Gifts & Day-Off", `${user.full_name} requested a gift: ${gift_details} ($${estimated_price}).`);
+      if (sup) pushNotification(sup.id, "Gifts & Day-Off", `${user.full_name} requested a gift: ${gift_details} ($${estimated_price}).`);
     }
 
     function markGiftBought(giftId) {
       const g = appState.gift_requests.find(x => x.id === giftId);
-      if (!g) return;
+      const user = currentUser();
+      const sup = supervisorUser();
+      if (!g || !user) return;
       g.status = "Bought / Done";
       saveLocalState();
       renderMain();
       showToast("Gift marked Bought / Done.", "emerald");
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("gift_requests").update({ status: "Bought / Done" }).eq("id", giftId).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "gift_requests.markBought",
+            () => sb.from("gift_requests").update({ status: "Bought / Done" }).eq("id", giftId),
+            { notifyToast: true }
+          );
+        })();
       }
-      const targetRecipient = currentUser().role === "supervisor" ? g.member_id : supervisorUser().id;
-      pushNotification(targetRecipient, "Gifts & Day-Off", `Gift Done & Implemented: ${g.gift_details}.`);
+      const targetRecipient = user.role === "supervisor" ? g.member_id : sup?.id;
+      if (targetRecipient) {
+        pushNotification(targetRecipient, "Gifts & Day-Off", `Gift Done & Implemented: ${g.gift_details}.`);
+      }
     }
 
     function submitDayOffRequest() {
       const user = currentUser();
-      const requested_date = document.getElementById("dayoff-date").value;
-      const reason = document.getElementById("dayoff-reason").value.trim();
+      const sup = supervisorUser();
+      if (!user) return;
+      const requested_date = document.getElementById("dayoff-date")?.value || "";
+      const reason = (document.getElementById("dayoff-reason")?.value || "").trim();
       if (!requested_date) return showToast("Select a date.", "amber");
 
       const item = {
@@ -2231,9 +2502,19 @@
       showToast("Day-off request submitted.", "emerald");
 
       if (isSupabaseConfigured && !simulatedOffline) {
-        sb.from("day_off_requests").insert({ member_id: user.id, requested_date, reason }).catch(() => {});
+        (async () => {
+          const { data } = await runSbWrite(
+            "day_off_requests.insert",
+            () => sb.from("day_off_requests").insert({ member_id: user.id, requested_date, reason }).select().single(),
+            { notifyToast: true }
+          );
+          if (data?.id) {
+            item.id = data.id;
+            saveLocalState();
+          }
+        })();
       }
-      pushNotification(supervisorUser().id, "Gifts & Day-Off", `${user.full_name} requested day off on ${requested_date}.`);
+      if (sup) pushNotification(sup.id, "Gifts & Day-Off", `${user.full_name} requested day off on ${requested_date}.`);
     }
 
     // =========================================================
@@ -2436,10 +2717,10 @@
     }
 
     function addMasterDoctor() {
-      const name = document.getElementById("new-doc-name").value.trim();
-      const specialty = document.getElementById("new-doc-spec").value.trim();
-      const location = document.getElementById("new-doc-loc").value;
-      const tier_clinic = document.getElementById("new-doc-tier").value.trim() || "Tier A";
+      const name = (document.getElementById("new-doc-name")?.value || "").trim();
+      const specialty = (document.getElementById("new-doc-spec")?.value || "").trim();
+      const location = document.getElementById("new-doc-loc")?.value || REGIONS[0];
+      const tier_clinic = (document.getElementById("new-doc-tier")?.value || "").trim() || "Tier A";
       if (!name || !specialty) return showToast("Enter doctor name and specialty.", "amber");
 
       const item = { id: uid("doc"), name, specialty, location, tier_clinic, is_active: true };
@@ -2449,9 +2730,17 @@
       showToast("Doctor added to master catalog.", "emerald");
 
       if (isSupabaseConfigured) {
-        sb.from("doctors").insert({ name, specialty, location, tier_clinic }).select().single().then(({ data }) => {
-          if (data) item.id = data.id;
-        }).catch(() => {});
+        (async () => {
+          const { data } = await runSbWrite(
+            "doctors.insert",
+            () => sb.from("doctors").insert({ name, specialty, location, tier_clinic }).select().single(),
+            { notifyToast: true }
+          );
+          if (data?.id) {
+            item.id = data.id;
+            saveLocalState();
+          }
+        })();
       }
     }
 
@@ -2478,10 +2767,10 @@
     function saveMasterDoctorEdit(docId) {
       const d = appState.doctors.find(x => x.id === docId);
       if (!d) return;
-      d.name = document.getElementById("ed-doc-name").value.trim();
-      d.specialty = document.getElementById("ed-doc-spec").value.trim();
-      d.location = document.getElementById("ed-doc-loc").value;
-      d.tier_clinic = document.getElementById("ed-doc-tier").value.trim();
+      d.name = (document.getElementById("ed-doc-name")?.value || "").trim();
+      d.specialty = (document.getElementById("ed-doc-spec")?.value || "").trim();
+      d.location = document.getElementById("ed-doc-loc")?.value || d.location;
+      d.tier_clinic = (document.getElementById("ed-doc-tier")?.value || "").trim();
 
       saveLocalState();
       closeModal();
@@ -2489,9 +2778,15 @@
       showToast("Doctor updated.", "emerald");
 
       if (isSupabaseConfigured) {
-        sb.from("doctors").update({
-          name: d.name, specialty: d.specialty, location: d.location, tier_clinic: d.tier_clinic
-        }).eq("id", docId).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "doctors.update",
+            () => sb.from("doctors").update({
+              name: d.name, specialty: d.specialty, location: d.location, tier_clinic: d.tier_clinic
+            }).eq("id", docId),
+            { notifyToast: true }
+          );
+        })();
       }
     }
 
@@ -2504,14 +2799,20 @@
       showToast(d.is_active ? "Doctor restored." : "Doctor archived.", "indigo");
 
       if (isSupabaseConfigured) {
-        sb.from("doctors").update({ is_active: d.is_active }).eq("id", docId).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "doctors.toggleActive",
+            () => sb.from("doctors").update({ is_active: d.is_active }).eq("id", docId),
+            { notifyToast: true }
+          );
+        })();
       }
     }
 
     function addMasterSample() {
-      const name = document.getElementById("new-smp-name").value.trim();
-      const unit = document.getElementById("new-smp-unit").value.trim() || "Packs";
-      const category = document.getElementById("new-smp-cat").value.trim() || "General";
+      const name = (document.getElementById("new-smp-name")?.value || "").trim();
+      const unit = (document.getElementById("new-smp-unit")?.value || "").trim() || "Packs";
+      const category = (document.getElementById("new-smp-cat")?.value || "").trim() || "General";
       if (!name) return showToast("Enter sample name.", "amber");
 
       const item = { id: uid("smp"), name, unit, category, office_total_taken: 0, is_active: true };
@@ -2521,9 +2822,17 @@
       showToast("Sample added to master catalog.", "emerald");
 
       if (isSupabaseConfigured) {
-        sb.from("samples").insert({ name, unit, category }).select().single().then(({ data }) => {
-          if (data) item.id = data.id;
-        }).catch(() => {});
+        (async () => {
+          const { data } = await runSbWrite(
+            "samples.insert",
+            () => sb.from("samples").insert({ name, unit, category }).select().single(),
+            { notifyToast: true }
+          );
+          if (data?.id) {
+            item.id = data.id;
+            saveLocalState();
+          }
+        })();
       }
     }
 
@@ -2547,9 +2856,9 @@
     function saveMasterSampleEdit(smpId) {
       const s = appState.samples.find(x => x.id === smpId);
       if (!s) return;
-      s.name = document.getElementById("ed-smp-name").value.trim();
-      s.unit = document.getElementById("ed-smp-unit").value.trim();
-      s.category = document.getElementById("ed-smp-cat").value.trim();
+      s.name = (document.getElementById("ed-smp-name")?.value || "").trim();
+      s.unit = (document.getElementById("ed-smp-unit")?.value || "").trim();
+      s.category = (document.getElementById("ed-smp-cat")?.value || "").trim();
 
       saveLocalState();
       closeModal();
@@ -2557,7 +2866,13 @@
       showToast("Sample updated.", "emerald");
 
       if (isSupabaseConfigured) {
-        sb.from("samples").update({ name: s.name, unit: s.unit, category: s.category }).eq("id", smpId).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "samples.update",
+            () => sb.from("samples").update({ name: s.name, unit: s.unit, category: s.category }).eq("id", smpId),
+            { notifyToast: true }
+          );
+        })();
       }
     }
 
@@ -2570,7 +2885,13 @@
       showToast(s.is_active ? "Sample restored." : "Sample archived.", "indigo");
 
       if (isSupabaseConfigured) {
-        sb.from("samples").update({ is_active: s.is_active }).eq("id", smpId).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "samples.toggleActive",
+            () => sb.from("samples").update({ is_active: s.is_active }).eq("id", smpId),
+            { notifyToast: true }
+          );
+        })();
       }
     }
 
@@ -2594,11 +2915,19 @@
 
       if (isSupabaseConfigured) {
         (async () => {
-          await sb.from("doctor_assignments").delete().eq("member_id", bulkTargetRepId).in("doctor_id", Array.from(visibleIds));
-          if (checkedIds.length > 0) {
-            await sb.from("doctor_assignments").insert(checkedIds.map(d => ({ doctor_id: d, member_id: bulkTargetRepId })));
+          const { error: delErr } = await runSbWrite(
+            "doctor_assignments.delete",
+            () => sb.from("doctor_assignments").delete().eq("member_id", bulkTargetRepId).in("doctor_id", Array.from(visibleIds)),
+            { notifyToast: true }
+          );
+          if (!delErr && checkedIds.length > 0) {
+            await runSbWrite(
+              "doctor_assignments.insert",
+              () => sb.from("doctor_assignments").insert(checkedIds.map(d => ({ doctor_id: d, member_id: bulkTargetRepId }))),
+              { notifyToast: true }
+            );
           }
-        })().catch(() => {});
+        })();
       }
     }
 
@@ -2682,28 +3011,37 @@
     }
 
     function applyPresetRule(mode) {
+      const dEl = document.getElementById("rule-daily");
+      const wEl = document.getElementById("rule-weekly");
+      if (!dEl || !wEl) return;
       if (mode.startsWith("Standard")) {
-        document.getElementById("rule-daily").value = 12;
-        document.getElementById("rule-weekly").value = 60;
+        dEl.value = 12;
+        wEl.value = 60;
       } else if (mode.startsWith("Holiday")) {
-        document.getElementById("rule-daily").value = 8;
-        document.getElementById("rule-weekly").value = 32;
+        dEl.value = 8;
+        wEl.value = 32;
       } else {
-        document.getElementById("rule-daily").value = 15;
-        document.getElementById("rule-weekly").value = 75;
+        dEl.value = 15;
+        wEl.value = 75;
       }
     }
 
     function saveScheduleRules() {
-      const mode_name = document.getElementById("rule-mode-select").value;
-      const daily_target = parseInt(document.getElementById("rule-daily").value || "12", 10);
-      const weekly_target = parseInt(document.getElementById("rule-weekly").value || "60", 10);
+      const mode_name = document.getElementById("rule-mode-select")?.value || appState.schedule_rules.mode_name;
+      const daily_target = parseInt(document.getElementById("rule-daily")?.value || "12", 10);
+      const weekly_target = parseInt(document.getElementById("rule-weekly")?.value || "60", 10);
       appState.schedule_rules = { mode_name, daily_target, weekly_target };
       saveLocalState();
       showToast("Quota rules updated across the team.", "emerald");
 
       if (isSupabaseConfigured) {
-        sb.from("schedule_rules").update({ mode_name, daily_target, weekly_target }).eq("id", 1).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "schedule_rules.update",
+            () => sb.from("schedule_rules").update({ mode_name, daily_target, weekly_target }).eq("id", 1),
+            { notifyToast: true }
+          );
+        })();
       }
     }
 
@@ -2790,7 +3128,13 @@
       showToast(`Variance marked ${status}.`, status === "Approved" ? "emerald" : "rose");
 
       if (isSupabaseConfigured) {
-        sb.from("quota_variances").update({ status }).eq("id", varId).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "quota_variances.decide",
+            () => sb.from("quota_variances").update({ status }).eq("id", varId),
+            { notifyToast: true }
+          );
+        })();
       }
       pushNotification(v.member_id, "Quota Variances", `Your quota variance for ${v.variance_date} was ${status}.`);
     }
@@ -2804,7 +3148,13 @@
       showToast(`Gift status: ${status}`, "indigo");
 
       if (isSupabaseConfigured) {
-        sb.from("gift_requests").update({ status }).eq("id", giftId).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "gift_requests.updateStatus",
+            () => sb.from("gift_requests").update({ status }).eq("id", giftId),
+            { notifyToast: true }
+          );
+        })();
       }
       pushNotification(g.member_id, "Gifts & Day-Off", `Gift request (${g.gift_details}) status updated to ${status}.`);
     }
@@ -2818,7 +3168,13 @@
       showToast(`Day-off status: ${status}`, "indigo");
 
       if (isSupabaseConfigured) {
-        sb.from("day_off_requests").update({ status }).eq("id", dayId).catch(() => {});
+        (async () => {
+          await runSbWrite(
+            "day_off_requests.updateStatus",
+            () => sb.from("day_off_requests").update({ status }).eq("id", dayId),
+            { notifyToast: true }
+          );
+        })();
       }
       pushNotification(d.member_id, "Gifts & Day-Off", `Day-off request for ${d.requested_date} is now ${status}.`);
     }
@@ -2878,11 +3234,11 @@
     }
 
     function createTask() {
-      const title = document.getElementById("task-title").value.trim();
-      const scope = document.getElementById("task-scope").value;
-      const priority = document.getElementById("task-priority").value;
-      const assigned_to = scope === "individual" ? (document.getElementById("task-assignee").value || null) : null;
-      const due_date = document.getElementById("task-due").value || todayISO();
+      const title = (document.getElementById("task-title")?.value || "").trim();
+      const scope = document.getElementById("task-scope")?.value || "team";
+      const priority = document.getElementById("task-priority")?.value || "Medium";
+      const assigned_to = scope === "individual" ? (document.getElementById("task-assignee")?.value || null) : null;
+      const due_date = document.getElementById("task-due")?.value || todayISO();
       if (!title) return showToast("Enter a task title.", "amber");
 
       const item = {
@@ -2895,9 +3251,17 @@
       showToast("Task published.", "emerald");
 
       if (isSupabaseConfigured) {
-        sb.from("tasks").insert({ title, scope, priority, assigned_to, due_date }).select().single().then(({ data }) => {
-          if (data) item.id = data.id;
-        }).catch(() => {});
+        (async () => {
+          const { data } = await runSbWrite(
+            "tasks.insert",
+            () => sb.from("tasks").insert({ title, scope, priority, assigned_to, due_date }).select().single(),
+            { notifyToast: true }
+          );
+          if (data?.id) {
+            item.id = data.id;
+            saveLocalState();
+          }
+        })();
       }
       if (assigned_to) {
         pushNotification(assigned_to, "Tasks", `New ${priority} priority task assigned: ${title}`);
@@ -2920,3 +3284,9 @@
   </script>
 </body>
 </html>
+```[cite: 1]
+
+### What Was Fixed & Hardened
+* **Removed `.catch()` on Supabase Query Builders:** Replaced `.insert(...).catch(...)`, `.update(...).catch(...)`, `.delete(...).catch(...)`, and `.rpc(...).catch(...)` with a centralized `runSbWrite()` helper using `async/await` and `try/catch` so Supabase query builders never throw `Uncaught TypeError: ... .catch is not a function`[cite: 1].
+* **Explicit Supabase `error` & Realtime Channel Logging:** Surfaced PostgREST `error` objects to `console.error` (and optional toasts) across writes, reads, and Realtime channel status callbacks so RLS rejections or missing table permissions show up clearly instead of failing silently[cite: 1].
+* **Defensive Storage & DOM Guards:** Wrapped `localStorage` reads/writes in `safeJsonParse` and `try/catch`, guarded DOM lookups against `null`, and added guard checks when `currentUser()` or `supervisorUser()` is `null`[cite: 1].
