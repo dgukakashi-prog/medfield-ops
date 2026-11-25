@@ -3284,9 +3284,3 @@
   </script>
 </body>
 </html>
-```[cite: 1]
-
-### What Was Fixed & Hardened
-* **Removed `.catch()` on Supabase Query Builders:** Replaced `.insert(...).catch(...)`, `.update(...).catch(...)`, `.delete(...).catch(...)`, and `.rpc(...).catch(...)` with a centralized `runSbWrite()` helper using `async/await` and `try/catch` so Supabase query builders never throw `Uncaught TypeError: ... .catch is not a function`[cite: 1].
-* **Explicit Supabase `error` & Realtime Channel Logging:** Surfaced PostgREST `error` objects to `console.error` (and optional toasts) across writes, reads, and Realtime channel status callbacks so RLS rejections or missing table permissions show up clearly instead of failing silently[cite: 1].
-* **Defensive Storage & DOM Guards:** Wrapped `localStorage` reads/writes in `safeJsonParse` and `try/catch`, guarded DOM lookups against `null`, and added guard checks when `currentUser()` or `supervisorUser()` is `null`[cite: 1].
