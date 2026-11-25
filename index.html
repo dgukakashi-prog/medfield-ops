@@ -1162,7 +1162,7 @@
         <div class="p-4 rounded-xl bg-slate-50 border border-slate-200 mb-4 flex items-center justify-between">
           <div>
             <p class="text-sm font-semibold text-slate-900">Simulated Offline Mode</p>
-            <p class="text-xs text-slate-500">Queue visits, status, plans, pickups & requests when offline.</p>
+            <p class="text-xs text-slate-500">Queues all visits, status, plans, pickups, requests & task updates when offline.</p>
           </div>
           <button onclick="toggleSimulatedOffline()" class="px-3 py-1.5 rounded-xl text-xs font-semibold ${
             simulatedOffline ? "bg-amber-500 text-slate-950" : "bg-slate-200 text-slate-800"
@@ -1210,6 +1210,9 @@
           if (item.type === "visit") {
             const { error } = await runSbWrite("sync.log_visit_atomic", () => sb.rpc("log_visit_atomic", item.payload));
             if (error) failedItems.push(item);
+          } else if (item.type === "visit_edit") {
+            const { error } = await runSbWrite("sync.visits.update", () => sb.from("visits").update(item.payload).eq("id", item.visit_id));
+            if (error) failedItems.push(item);
           } else if (item.type === "status") {
             const { error } = await runSbWrite("sync.profiles.update", () => sb.from("profiles").update(item.payload).eq("id", item.member_id));
             if (error) failedItems.push(item);
@@ -1222,11 +1225,52 @@
           } else if (item.type === "gift") {
             const { error } = await runSbWrite("sync.gift_requests.insert", () => sb.from("gift_requests").insert(item.payload));
             if (error) failedItems.push(item);
+          } else if (item.type === "gift_status") {
+            const { error } = await runSbWrite("sync.gift_requests.update", () => sb.from("gift_requests").update(item.payload).eq("id", item.gift_id));
+            if (error) failedItems.push(item);
           } else if (item.type === "day_off") {
             const { error } = await runSbWrite("sync.day_off_requests.insert", () => sb.from("day_off_requests").insert(item.payload));
             if (error) failedItems.push(item);
+          } else if (item.type === "day_off_status") {
+            const { error } = await runSbWrite("sync.day_off_requests.update", () => sb.from("day_off_requests").update(item.payload).eq("id", item.day_id));
+            if (error) failedItems.push(item);
           } else if (item.type === "variance") {
             const { error } = await runSbWrite("sync.quota_variances.insert", () => sb.from("quota_variances").insert(item.payload));
+            if (error) failedItems.push(item);
+          } else if (item.type === "variance_status") {
+            const { error } = await runSbWrite("sync.quota_variances.update", () => sb.from("quota_variances").update(item.payload).eq("id", item.var_id));
+            if (error) failedItems.push(item);
+          } else if (item.type === "task_create") {
+            const { error } = await runSbWrite("sync.tasks.insert", () => sb.from("tasks").insert(item.payload));
+            if (error) failedItems.push(item);
+          } else if (item.type === "task_status") {
+            const { error } = await runSbWrite("sync.tasks.update", () => sb.from("tasks").update(item.payload).eq("id", item.task_id));
+            if (error) failedItems.push(item);
+          } else if (item.type === "doctor_create") {
+            const { error } = await runSbWrite("sync.doctors.insert", () => sb.from("doctors").insert(item.payload));
+            if (error) failedItems.push(item);
+          } else if (item.type === "doctor_edit") {
+            const { error } = await runSbWrite("sync.doctors.update", () => sb.from("doctors").update(item.payload).eq("id", item.doc_id));
+            if (error) failedItems.push(item);
+          } else if (item.type === "sample_create") {
+            const { error } = await runSbWrite("sync.samples.insert", () => sb.from("samples").insert(item.payload));
+            if (error) failedItems.push(item);
+          } else if (item.type === "sample_edit") {
+            const { error } = await runSbWrite("sync.samples.update", () => sb.from("samples").update(item.payload).eq("id", item.smp_id));
+            if (error) failedItems.push(item);
+          } else if (item.type === "bulk_assign") {
+            const { error: delErr } = await runSbWrite("sync.doctor_assignments.delete", () => sb.from("doctor_assignments").delete().eq("member_id", item.member_id).in("doctor_id", item.visible_ids));
+            if (delErr) {
+              failedItems.push(item);
+            } else if (Array.isArray(item.checked_ids) && item.checked_ids.length > 0) {
+              const { error: insErr } = await runSbWrite("sync.doctor_assignments.insert", () => sb.from("doctor_assignments").insert(item.checked_ids.map(d => ({ doctor_id: d, member_id: item.member_id }))));
+              if (insErr) failedItems.push(item);
+            }
+          } else if (item.type === "schedule_rules") {
+            const { error } = await runSbWrite("sync.schedule_rules.update", () => sb.from("schedule_rules").update(item.payload).eq("id", 1));
+            if (error) failedItems.push(item);
+          } else if (item.type === "notif_insert") {
+            const { error } = await runSbWrite("sync.notifications.insert", () => sb.from("notifications").insert(item.payload));
             if (error) failedItems.push(item);
           }
         }
@@ -1510,16 +1554,28 @@
       if (user.role === "supervisor" && activeTab === 4) renderMain();
       showToast(`Task status: ${task.status}`, "indigo");
 
-      if (isSupabaseConfigured && !isCurrentlyOffline()) {
-        await runSbWrite(
-          "tasks.update",
-          () => sb.from("tasks").update({ status: task.status }).eq("id", taskId),
-          { notifyToast: true }
-        );
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({
+          type: "task_status",
+          label: `Task "${task.title}" → ${task.status}`,
+          task_id: taskId,
+          payload: { status: task.status }
+        });
+      } else if (isSupabaseConfigured) {
+        (async () => {
+          await runSbWrite(
+            "tasks.update",
+            () => sb.from("tasks").update({ status: task.status }).eq("id", taskId),
+            { notifyToast: true }
+          );
+        })();
       }
 
       if (sup && sup.id !== user.id) {
         pushNotification(sup.id, "Tasks", `${user.full_name} marked task "${task.title}" as ${task.status}.`);
+      }
+      if (task.assigned_to && task.assigned_to !== user.id) {
+        pushNotification(task.assigned_to, "Tasks", `Task "${task.title}" is now ${task.status} (updated by ${user.full_name}).`);
       }
     }
 
@@ -1837,11 +1893,13 @@
       const sup = supervisorUser();
       if (!user) return;
       const nowIso = new Date().toISOString();
+      let roundMsg = "";
 
       if (newStatus === "In the Field") {
         user.live_status = "In the Field";
         user.active_round_started_at = nowIso;
-        if (sup) pushNotification(sup.id, "Field Rounds", `${user.full_name} started field round in ${user.region}.`);
+        roundMsg = `${user.full_name} started field round in ${user.region}.`;
+        if (sup && sup.id !== user.id) pushNotification(sup.id, "Field Rounds", roundMsg);
       } else if (newStatus === "Finished Field") {
         const dur = user.active_round_started_at
           ? Math.floor((Date.now() - new Date(user.active_round_started_at).getTime()) / 1000)
@@ -1849,13 +1907,15 @@
         user.live_status = "Finished Field";
         user.last_round_duration_sec = dur;
         user.active_round_started_at = null;
+        roundMsg = `${user.full_name} ended field round (${formatDuration(dur)}).`;
         appState.field_sessions.unshift({
           id: uid("sess"), member_id: user.id, started_at: nowIso, ended_at: nowIso, duration_sec: dur
         });
-        if (sup) pushNotification(sup.id, "Field Rounds", `${user.full_name} finished field round (${formatDuration(dur)}).`);
+        if (sup && sup.id !== user.id) pushNotification(sup.id, "Field Rounds", roundMsg);
       } else {
         user.live_status = newStatus;
-        if (sup) pushNotification(sup.id, "Field Rounds", `${user.full_name} set status to ${newStatus} at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`);
+        roundMsg = `${user.full_name} set status to ${newStatus} at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`;
+        if (sup && sup.id !== user.id) pushNotification(sup.id, "Field Rounds", roundMsg);
       }
 
       const payload = {
@@ -1870,6 +1930,13 @@
 
       if (isCurrentlyOffline()) {
         queueOfflineAction({ type: "status", label: `Status → ${newStatus}`, member_id: user.id, payload });
+        if (sup && sup.id !== user.id && roundMsg) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: ${newStatus}`,
+            payload: { recipient_id: sup.id, category: "Field Rounds", message: roundMsg }
+          });
+        }
       } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite("profiles.status", () => sb.from("profiles").update(payload).eq("id", user.id), { notifyToast: true });
@@ -1966,7 +2033,8 @@
         created_at: new Date().toISOString()
       };
       appState.quota_variances.unshift(variance);
-      if (sup) pushNotification(sup.id, "Quota Variances", `${user.full_name} requested >${appState.schedule_rules.daily_target}/day variance on ${visitDate}.`);
+      const varMsg = `${user.full_name} requested >${appState.schedule_rules.daily_target}/day variance on ${visitDate}.`;
+      if (sup && sup.id !== user.id) pushNotification(sup.id, "Quota Variances", varMsg);
       closeModal();
       finalizeVisitSubmission({
         doctorId,
@@ -1979,6 +2047,13 @@
 
       if (isCurrentlyOffline()) {
         queueOfflineAction({ type: "variance", label: `Over-quota variance (${visitDate})`, payload: variancePayload });
+        if (sup && sup.id !== user.id) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Over-quota variance`,
+            payload: { recipient_id: sup.id, category: "Quota Variances", message: varMsg }
+          });
+        }
       } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
@@ -2078,16 +2153,19 @@
       v.visit_type = document.getElementById("edit-vis-type")?.value || v.visit_type;
       v.notes = (document.getElementById("edit-vis-notes")?.value || "").trim();
 
+      const updatePayload = { visit_type: v.visit_type, notes: v.notes };
       saveLocalState();
       closeModal();
       renderMain();
       showToast("Visit updated.", "emerald");
 
-      if (isSupabaseConfigured && !isCurrentlyOffline()) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "visit_edit", label: `Edit visit (${v.visit_date})`, visit_id: visitId, payload: updatePayload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "visits.update",
-            () => sb.from("visits").update({ visit_type: v.visit_type, notes: v.notes }).eq("id", visitId),
+            () => sb.from("visits").update(updatePayload).eq("id", visitId),
             { notifyToast: true }
           );
         })();
@@ -2199,12 +2277,20 @@
         created_at: new Date().toISOString()
       };
       appState.quota_variances.unshift(item);
+      const varMsg = `${user.full_name} submitted a <${appState.schedule_rules.daily_target}/day variance for ${date}.`;
       saveLocalState();
       closeModal();
       showToast("Variance request sent to Supervisor.", "emerald");
 
       if (isCurrentlyOffline()) {
         queueOfflineAction({ type: "variance", label: `Under-quota variance (${date})`, payload });
+        if (sup && sup.id !== user.id) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Under-quota variance`,
+            payload: { recipient_id: sup.id, category: "Quota Variances", message: varMsg }
+          });
+        }
       } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
@@ -2218,7 +2304,7 @@
           }
         })();
       }
-      if (sup) pushNotification(sup.id, "Quota Variances", `${user.full_name} submitted a <${appState.schedule_rules.daily_target}/day variance for ${date}.`);
+      if (sup && sup.id !== user.id) pushNotification(sup.id, "Quota Variances", varMsg);
     }
 
     // Tab 3: Plans & Actuals
@@ -2499,6 +2585,7 @@
       });
 
       const rpcPayload = { p_member_id: user.id, p_sample_id: sampleId, p_qty: qty, p_note: note };
+      const pickMsg = `${user.full_name} took ${qty} ${smp?.unit || "units"} of ${smp?.name || "sample"} from office.`;
 
       saveLocalState();
       renderMain();
@@ -2506,6 +2593,13 @@
 
       if (isCurrentlyOffline()) {
         queueOfflineAction({ type: "pickup", label: `Sample pickup (${qty} ${smp?.name || ""})`, payload: rpcPayload });
+        if (sup && sup.id !== user.id) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Sample pickup`,
+            payload: { recipient_id: sup.id, category: "Field Rounds", message: pickMsg }
+          });
+        }
       } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
@@ -2515,7 +2609,7 @@
           );
         })();
       }
-      if (sup) pushNotification(sup.id, "Field Rounds", `${user.full_name} took ${qty} ${smp?.unit || "units"} of ${smp?.name || "sample"} from office.`);
+      if (sup && sup.id !== user.id) pushNotification(sup.id, "Field Rounds", pickMsg);
     }
 
     // Tab 5: Gifts & Day-Off
@@ -2599,12 +2693,20 @@
         status: "Pending", created_at: new Date().toISOString()
       };
       appState.gift_requests.unshift(item);
+      const giftMsg = `${user.full_name} requested a gift: ${gift_details} ($${estimated_price}).`;
       saveLocalState();
       renderMain();
       showToast("Gift request submitted.", "emerald");
 
       if (isCurrentlyOffline()) {
         queueOfflineAction({ type: "gift", label: `Gift request: ${gift_details}`, payload });
+        if (sup && sup.id !== user.id) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Gift request`,
+            payload: { recipient_id: sup.id, category: "Gifts & Day-Off", message: giftMsg }
+          });
+        }
       } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
@@ -2618,7 +2720,7 @@
           }
         })();
       }
-      if (sup) pushNotification(sup.id, "Gifts & Day-Off", `${user.full_name} requested a gift: ${gift_details} ($${estimated_price}).`);
+      if (sup && sup.id !== user.id) pushNotification(sup.id, "Gifts & Day-Off", giftMsg);
     }
 
     function markGiftBought(giftId) {
@@ -2627,11 +2729,27 @@
       const sup = supervisorUser();
       if (!g || !user) return;
       g.status = "Bought / Done";
+      const boughtMsg = `Gift Done & Implemented: ${g.gift_details}.`;
+      const targetRecipient = user.role === "supervisor" ? g.member_id : sup?.id;
       saveLocalState();
       renderMain();
       showToast("Gift marked Bought / Done.", "emerald");
 
-      if (isSupabaseConfigured && !isCurrentlyOffline()) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({
+          type: "gift_status",
+          label: `Gift bought: ${g.gift_details}`,
+          gift_id: giftId,
+          payload: { status: "Bought / Done" }
+        });
+        if (targetRecipient && targetRecipient !== user.id) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Gift done`,
+            payload: { recipient_id: targetRecipient, category: "Gifts & Day-Off", message: boughtMsg }
+          });
+        }
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "gift_requests.markBought",
@@ -2640,9 +2758,8 @@
           );
         })();
       }
-      const targetRecipient = user.role === "supervisor" ? g.member_id : sup?.id;
-      if (targetRecipient) {
-        pushNotification(targetRecipient, "Gifts & Day-Off", `Gift Done & Implemented: ${g.gift_details}.`);
+      if (targetRecipient && targetRecipient !== user.id) {
+        pushNotification(targetRecipient, "Gifts & Day-Off", boughtMsg);
       }
     }
 
@@ -2659,12 +2776,20 @@
         id: uid("day"), ...payload, status: "Pending", created_at: new Date().toISOString()
       };
       appState.day_off_requests.unshift(item);
+      const dayMsg = `${user.full_name} requested day off on ${requested_date}.`;
       saveLocalState();
       renderMain();
       showToast("Day-off request submitted.", "emerald");
 
       if (isCurrentlyOffline()) {
         queueOfflineAction({ type: "day_off", label: `Day off: ${requested_date}`, payload });
+        if (sup && sup.id !== user.id) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Day-off request`,
+            payload: { recipient_id: sup.id, category: "Gifts & Day-Off", message: dayMsg }
+          });
+        }
       } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
@@ -2678,7 +2803,7 @@
           }
         })();
       }
-      if (sup) pushNotification(sup.id, "Gifts & Day-Off", `${user.full_name} requested day off on ${requested_date}.`);
+      if (sup && sup.id !== user.id) pushNotification(sup.id, "Gifts & Day-Off", dayMsg);
     }
 
     // =========================================================
@@ -2883,17 +3008,20 @@
       const tier_clinic = (document.getElementById("new-doc-tier")?.value || "").trim() || "Tier A";
       if (!name || !specialty) return showToast("Enter doctor name and specialty.", "amber");
 
-      const item = { id: uid("doc"), name, specialty, location, tier_clinic, is_active: true };
+      const payload = { name, specialty, location, tier_clinic };
+      const item = { id: uid("doc"), ...payload, is_active: true };
       appState.doctors.unshift(item);
       saveLocalState();
       renderMain();
       showToast("Doctor added to master catalog.", "emerald");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "doctor_create", label: `Add doctor: ${name}`, payload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
             "doctors.insert",
-            () => sb.from("doctors").insert({ name, specialty, location, tier_clinic }).select().single(),
+            () => sb.from("doctors").insert(payload).select().single(),
             { notifyToast: true }
           );
           if (data?.id) {
@@ -2932,18 +3060,21 @@
       d.location = document.getElementById("ed-doc-loc")?.value || d.location;
       d.tier_clinic = (document.getElementById("ed-doc-tier")?.value || "").trim();
 
+      const updatePayload = {
+        name: d.name, specialty: d.specialty, location: d.location, tier_clinic: d.tier_clinic
+      };
       saveLocalState();
       closeModal();
       renderMain();
       showToast("Doctor updated.", "emerald");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "doctor_edit", label: `Edit doctor: ${d.name}`, doc_id: docId, payload: updatePayload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "doctors.update",
-            () => sb.from("doctors").update({
-              name: d.name, specialty: d.specialty, location: d.location, tier_clinic: d.tier_clinic
-            }).eq("id", docId),
+            () => sb.from("doctors").update(updatePayload).eq("id", docId),
             { notifyToast: true }
           );
         })();
@@ -2958,7 +3089,9 @@
       renderMain();
       showToast(d.is_active ? "Doctor restored." : "Doctor archived.", "indigo");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "doctor_edit", label: `${d.is_active ? "Restore" : "Archive"} doctor: ${d.name}`, doc_id: docId, payload: { is_active: d.is_active } });
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "doctors.toggleActive",
@@ -2975,17 +3108,20 @@
       const category = (document.getElementById("new-smp-cat")?.value || "").trim() || "General";
       if (!name) return showToast("Enter sample name.", "amber");
 
-      const item = { id: uid("smp"), name, unit, category, office_total_taken: 0, is_active: true };
+      const payload = { name, unit, category };
+      const item = { id: uid("smp"), ...payload, office_total_taken: 0, is_active: true };
       appState.samples.unshift(item);
       saveLocalState();
       renderMain();
       showToast("Sample added to master catalog.", "emerald");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "sample_create", label: `Add sample: ${name}`, payload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
             "samples.insert",
-            () => sb.from("samples").insert({ name, unit, category }).select().single(),
+            () => sb.from("samples").insert(payload).select().single(),
             { notifyToast: true }
           );
           if (data?.id) {
@@ -3020,16 +3156,19 @@
       s.unit = (document.getElementById("ed-smp-unit")?.value || "").trim();
       s.category = (document.getElementById("ed-smp-cat")?.value || "").trim();
 
+      const updatePayload = { name: s.name, unit: s.unit, category: s.category };
       saveLocalState();
       closeModal();
       renderMain();
       showToast("Sample updated.", "emerald");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "sample_edit", label: `Edit sample: ${s.name}`, smp_id: smpId, payload: updatePayload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "samples.update",
-            () => sb.from("samples").update({ name: s.name, unit: s.unit, category: s.category }).eq("id", smpId),
+            () => sb.from("samples").update(updatePayload).eq("id", smpId),
             { notifyToast: true }
           );
         })();
@@ -3044,7 +3183,9 @@
       renderMain();
       showToast(s.is_active ? "Sample restored." : "Sample archived.", "indigo");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "sample_edit", label: `${s.is_active ? "Restore" : "Archive"} sample: ${s.name}`, smp_id: smpId, payload: { is_active: s.is_active } });
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "samples.toggleActive",
@@ -3060,11 +3201,12 @@
     }
 
     function saveBulkAssignments() {
-      const visibleIds = new Set(Array.from(document.querySelectorAll(".bulk-doc-cb")).map(cb => cb.value));
+      const visibleIds = Array.from(document.querySelectorAll(".bulk-doc-cb")).map(cb => cb.value);
+      const visibleSet = new Set(visibleIds);
       const checkedIds = Array.from(document.querySelectorAll(".bulk-doc-cb:checked")).map(cb => cb.value);
 
       appState.doctor_assignments = appState.doctor_assignments.filter(
-        a => !(a.member_id === bulkTargetRepId && visibleIds.has(a.doctor_id))
+        a => !(a.member_id === bulkTargetRepId && visibleSet.has(a.doctor_id))
       );
       checkedIds.forEach(docId => {
         appState.doctor_assignments.push({ doctor_id: docId, member_id: bulkTargetRepId });
@@ -3073,11 +3215,19 @@
       saveLocalState();
       showToast("Bulk doctor assignments saved.", "emerald");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({
+          type: "bulk_assign",
+          label: `Bulk assign (${checkedIds.length} doctors)`,
+          member_id: bulkTargetRepId,
+          visible_ids: visibleIds,
+          checked_ids: checkedIds
+        });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { error: delErr } = await runSbWrite(
             "doctor_assignments.delete",
-            () => sb.from("doctor_assignments").delete().eq("member_id", bulkTargetRepId).in("doctor_id", Array.from(visibleIds)),
+            () => sb.from("doctor_assignments").delete().eq("member_id", bulkTargetRepId).in("doctor_id", visibleIds),
             { notifyToast: true }
           );
           if (!delErr && checkedIds.length > 0) {
@@ -3187,15 +3337,18 @@
       const mode_name = document.getElementById("rule-mode-select")?.value || appState.schedule_rules.mode_name;
       const daily_target = parseInt(document.getElementById("rule-daily")?.value || "12", 10);
       const weekly_target = parseInt(document.getElementById("rule-weekly")?.value || "60", 10);
-      appState.schedule_rules = { mode_name, daily_target, weekly_target };
+      const payload = { mode_name, daily_target, weekly_target };
+      appState.schedule_rules = payload;
       saveLocalState();
       showToast("Quota rules updated across the team.", "emerald");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "schedule_rules", label: `Quota rules: ${mode_name}`, payload });
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "schedule_rules.update",
-            () => sb.from("schedule_rules").update({ mode_name, daily_target, weekly_target }).eq("id", 1),
+            () => sb.from("schedule_rules").update(payload).eq("id", 1),
             { notifyToast: true }
           );
         })();
@@ -3275,13 +3428,24 @@
 
     function decideVariance(varId, status) {
       const v = appState.quota_variances.find(x => x.id === varId);
+      const user = currentUser();
       if (!v) return;
       v.status = status;
+      const varMsg = `Your quota variance for ${v.variance_date} was ${status}.`;
       saveLocalState();
       renderMain();
       showToast(`Variance marked ${status}.`, status === "Approved" ? "emerald" : "rose");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "variance_status", label: `Variance ${status} (${v.variance_date})`, var_id: varId, payload: { status } });
+        if (v.member_id && v.member_id !== user?.id) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Variance ${status}`,
+            payload: { recipient_id: v.member_id, category: "Quota Variances", message: varMsg }
+          });
+        }
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "quota_variances.decide",
@@ -3290,18 +3454,31 @@
           );
         })();
       }
-      pushNotification(v.member_id, "Quota Variances", `Your quota variance for ${v.variance_date} was ${status}.`);
+      if (v.member_id && v.member_id !== user?.id) {
+        pushNotification(v.member_id, "Quota Variances", varMsg);
+      }
     }
 
     function updateGiftStatus(giftId, status) {
       const g = appState.gift_requests.find(x => x.id === giftId);
+      const user = currentUser();
       if (!g) return;
       g.status = status;
+      const giftStatusMsg = `Gift request (${g.gift_details}) status updated to ${status}.`;
       saveLocalState();
       renderMain();
       showToast(`Gift status: ${status}`, "indigo");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "gift_status", label: `Gift ${status}: ${g.gift_details}`, gift_id: giftId, payload: { status } });
+        if (g.member_id && g.member_id !== user?.id) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Gift ${status}`,
+            payload: { recipient_id: g.member_id, category: "Gifts & Day-Off", message: giftStatusMsg }
+          });
+        }
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "gift_requests.updateStatus",
@@ -3310,18 +3487,31 @@
           );
         })();
       }
-      pushNotification(g.member_id, "Gifts & Day-Off", `Gift request (${g.gift_details}) status updated to ${status}.`);
+      if (g.member_id && g.member_id !== user?.id) {
+        pushNotification(g.member_id, "Gifts & Day-Off", giftStatusMsg);
+      }
     }
 
     function updateDayOffStatus(dayId, status) {
       const d = appState.day_off_requests.find(x => x.id === dayId);
+      const user = currentUser();
       if (!d) return;
       d.status = status;
+      const dayStatusMsg = `Day-off request for ${d.requested_date} is now ${status}.`;
       saveLocalState();
       renderMain();
       showToast(`Day-off status: ${status}`, "indigo");
 
-      if (isSupabaseConfigured) {
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "day_off_status", label: `Day off ${status} (${d.requested_date})`, day_id: dayId, payload: { status } });
+        if (d.member_id && d.member_id !== user?.id) {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Day off ${status}`,
+            payload: { recipient_id: d.member_id, category: "Gifts & Day-Off", message: dayStatusMsg }
+          });
+        }
+      } else if (isSupabaseConfigured) {
         (async () => {
           await runSbWrite(
             "day_off_requests.updateStatus",
@@ -3330,7 +3520,9 @@
           );
         })();
       }
-      pushNotification(d.member_id, "Gifts & Day-Off", `Day-off request for ${d.requested_date} is now ${status}.`);
+      if (d.member_id && d.member_id !== user?.id) {
+        pushNotification(d.member_id, "Gifts & Day-Off", dayStatusMsg);
+      }
     }
 
     // Supervisor Tab 5: Assign Tasks & Reset Demo
@@ -3388,15 +3580,18 @@
     }
 
     function createTask() {
+      const user = currentUser();
       const title = (document.getElementById("task-title")?.value || "").trim();
       const scope = document.getElementById("task-scope")?.value || "team";
       const priority = document.getElementById("task-priority")?.value || "Medium";
       const assigned_to = scope === "individual" ? (document.getElementById("task-assignee")?.value || null) : null;
       const due_date = document.getElementById("task-due")?.value || todayISO();
       if (!title) return showToast("Enter a task title.", "amber");
+      if (scope === "individual" && !assigned_to) return showToast("Select a member for an individual task.", "amber");
 
+      const payload = { title, scope, priority, assigned_to, due_date };
       const item = {
-        id: uid("task"), title, scope, priority, assigned_to, due_date, status: "Open", created_at: new Date().toISOString()
+        id: uid("task"), ...payload, status: "Open", created_at: new Date().toISOString()
       };
       appState.tasks.unshift(item);
       saveLocalState();
@@ -3404,11 +3599,26 @@
       renderMain();
       showToast("Task published.", "emerald");
 
-      if (isSupabaseConfigured) {
+      const recipients = scope === "team"
+        ? appState.profiles.filter(p => p.role === "member" && p.id !== user?.id).map(p => p.id)
+        : (assigned_to && assigned_to !== user?.id ? [assigned_to] : []);
+
+      const notifMsg = `New ${priority} priority ${scope === "team" ? "team " : ""}task assigned: ${title} (Due ${due_date}).`;
+
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({ type: "task_create", label: `Task: ${title}`, payload });
+        recipients.forEach(recId => {
+          queueOfflineAction({
+            type: "notif_insert",
+            label: `Notif: Task assigned`,
+            payload: { recipient_id: recId, category: "Tasks", message: notifMsg }
+          });
+        });
+      } else if (isSupabaseConfigured) {
         (async () => {
           const { data } = await runSbWrite(
             "tasks.insert",
-            () => sb.from("tasks").insert({ title, scope, priority, assigned_to, due_date }).select().single(),
+            () => sb.from("tasks").insert(payload).select().single(),
             { notifyToast: true }
           );
           if (data?.id) {
@@ -3417,9 +3627,10 @@
           }
         })();
       }
-      if (assigned_to) {
-        pushNotification(assigned_to, "Tasks", `New ${priority} priority task assigned: ${title}`);
-      }
+
+      recipients.forEach(recId => {
+        pushNotification(recId, "Tasks", notifMsg);
+      });
     }
 
     function resetDemoState() {
