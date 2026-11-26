@@ -1326,19 +1326,18 @@ case "office_sample_balances": {
               default: result = { error: { message: `Unsupported queued action: ${item.type || "unknown"}`, code: "UNSUPPORTED_QUEUE_ACTION" } };
             }
           } catch (err) { result = { error: err }; }
-          if (result?.error) {
-  console.error(`[Offline sync ${item.type}]`, result.error);
+                    if (result?.error) {
+            console.error(`[Offline sync ${item.type}]`, result.error);
 
-  if (
-    item.type === "pickup" ||
-    item.type === "cancel_visit" ||
-    isRetryableSyncError(result.error)
-  ) {
-    retryItems.push(item);
-  } else {
-    permanentFailures.push({ item, error: result.error });
-  }
-}
+            if (
+              item.type === "pickup" ||
+              item.type === "cancel_visit" ||
+              isRetryableSyncError(result.error)
+            ) {
+              retryItems.push(item);
+            } else {
+              permanentFailures.push({ item, error: result.error });
+            }
           }
         }
         offlineQueue = retryItems;
