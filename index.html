@@ -530,6 +530,7 @@
         doctors,
         doctor_assignments: assignments,
         samples,
+        office_sample_balances: [],
         member_sample_inventory: inventory,
         sample_pickups: [],
         field_sessions: [],
@@ -705,91 +706,88 @@
       }
 
       const [
-  allowRes, profRes, docRes, assignRes, smpRes, invRes,
-  pickRes, sessRes, varRes, visRes, planRes, giftRes,
-  dayRes, taskRes, notifRes, ruleRes
-] = await Promise.all([
-  sb.from("allowed_emails").select("email, role, member_code, full_name, region"),
-  sb.from("profiles").select("id, email, member_code, full_name, role, region, live_status, active_round_started_at, last_round_duration_sec, is_platform_admin").order("member_code"),
-  sb.from("doctors").select("id, name, specialty, location, tier_clinic, is_active").order("name"),
-  sb.from("doctor_assignments").select("doctor_id, member_id"),
-  sb.from("samples").select("id, name, unit, category, office_total_taken, is_active").order("name"),
-  sb.from("member_sample_inventory").select("member_id, sample_id, stock"),
-  sb.from("sample_pickups").select("id, member_id, sample_id, quantity, note, created_at").order("created_at", { ascending: false }).limit(200),
-  sb.from("field_sessions").select("id, member_id, started_at, ended_at, duration_sec").order("started_at", { ascending: false }).limit(200),
-  sb.from("quota_variances").select("id, member_id, variance_date, variance_type, visit_count, target_count, reason, status, created_at").order("created_at", { ascending: false }).limit(200),
-  sb.from("visits").select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at, cancelled_at, cancelled_by, cancellation_reason").order("created_at", { ascending: false }).limit(500),
-  sb.from("plans").select("id, member_id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples, created_at").order("created_at", { ascending: false }).limit(200),
-  sb.from("gift_requests").select("id, member_id, gift_details, estimated_price, buyer_role, reason, status, created_at").order("created_at", { ascending: false }).limit(200),
-  sb.from("day_off_requests").select("id, member_id, requested_date, reason, status, created_at").order("created_at", { ascending: false }).limit(200),
-  sb.from("tasks").select("id, title, scope, priority, assigned_to, due_date, status, created_at").order("created_at", { ascending: false }).limit(200),
-  sb.from("notifications").select("id, recipient_id, category, message, is_read, created_at").order("created_at", { ascending: false }).limit(150),
-  sb.from("schedule_rules").select("mode_name, daily_target, weekly_target").eq("id", 1).maybeSingle()
-]);
+        allowRes, profRes, docRes, assignRes, smpRes, invRes,
+        pickRes, sessRes, varRes, visRes, planRes, giftRes,
+        dayRes, taskRes, notifRes, ruleRes
+      ] = await Promise.all([
+        sb.from("allowed_emails").select("email, role, member_code, full_name, region"),
+        sb.from("profiles").select("id, email, member_code, full_name, role, region, live_status, active_round_started_at, last_round_duration_sec, is_platform_admin").order("member_code"),
+        sb.from("doctors").select("id, name, specialty, location, tier_clinic, is_active").order("name"),
+        sb.from("doctor_assignments").select("doctor_id, member_id"),
+        sb.from("samples").select("id, name, unit, category, office_total_taken, is_active").order("name"),
+        sb.from("member_sample_inventory").select("member_id, sample_id, stock"),
+        sb.from("sample_pickups").select("id, member_id, sample_id, quantity, note, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("field_sessions").select("id, member_id, started_at, ended_at, duration_sec").order("started_at", { ascending: false }).limit(200),
+        sb.from("quota_variances").select("id, member_id, variance_date, variance_type, visit_count, target_count, reason, status, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("visits").select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at, cancelled_at, cancelled_by, cancellation_reason").order("created_at", { ascending: false }).limit(500),
+        sb.from("plans").select("id, member_id, plan_name, plan_type, expected_entry_time, target_doctor_ids, planned_samples, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("gift_requests").select("id, member_id, gift_details, estimated_price, buyer_role, reason, status, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("day_off_requests").select("id, member_id, requested_date, reason, status, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("tasks").select("id, title, scope, priority, assigned_to, due_date, status, created_at").order("created_at", { ascending: false }).limit(200),
+        sb.from("notifications").select("id, recipient_id, category, message, is_read, created_at").order("created_at", { ascending: false }).limit(150),
+        sb.from("schedule_rules").select("mode_name, daily_target, weekly_target").eq("id", 1).maybeSingle()
+      ]);
 
-[
-  allowRes, profRes, docRes, assignRes, smpRes, invRes,
-  pickRes, sessRes, varRes, visRes, planRes, giftRes,
-  dayRes, taskRes, notifRes, ruleRes
-].forEach((r, idx) => {
-  if (r && r.error) {
-    console.error(`Supabase load query #${idx} error:`, r.error);
-  }
-});
+      [
+        allowRes, profRes, docRes, assignRes, smpRes, invRes,
+        pickRes, sessRes, varRes, visRes, planRes, giftRes,
+        dayRes, taskRes, notifRes, ruleRes
+      ].forEach((r, idx) => {
+        if (r && r.error) {
+          console.error(`Supabase load query #${idx} error:`, r.error);
+        }
+      });
 
-     
+      const profiles = profRes?.data || [];
+      const me = profiles.find(
+        p => (p.email || "").toLowerCase() === normalizedEmail
+      );
 
+      if (!me) {
+        showToast(
+          "Your email is not registered in profiles yet. Ask the Supervisor to add you.",
+          "rose"
+        );
 
-const profiles = profRes?.data || [];
-const me = profiles.find(
-  p => (p.email || "").toLowerCase() === normalizedEmail
-);
+        try {
+          await sb.auth.signOut();
+        } catch (err) {
+          console.error("Sign out after missing profile error:", err);
+        }
 
-if (!me) {
-  showToast(
-    "Your email is not registered in profiles yet. Ask the Supervisor to add you.",
-    "rose"
-  );
+        document.getElementById("app-shell")?.classList.add("hidden");
+        document.getElementById("auth-screen")?.classList.remove("hidden");
+        return;
+      }
 
-  try {
-    await sb.auth.signOut();
-  } catch (err) {
-    console.error("Sign out after missing profile error:", err);
-  }
+      const officeRes = me.is_platform_admin === true
+        ? await sb.rpc("get_office_sample_balances")
+        : { data: [], error: null };
 
-  document.getElementById("app-shell")?.classList.add("hidden");
-  document.getElementById("auth-screen")?.classList.remove("hidden");
-  return;
-}
+      if (officeRes.error) {
+        console.error("Office stock load error:", officeRes.error);
+      }
 
-const officeRes = me.is_platform_admin === true
-  ? await sb.rpc("get_office_sample_balances")
-  : { data: [], error: null };
-
-if (officeRes.error) {
-  console.error("Office stock load error:", officeRes.error);
-}
-
-const previousActiveId = activeUserId;
-appState = {
-  schedule_rules: ruleRes?.data || { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
-  allowlist: allowRes?.data || [],
-  profiles,
-  doctors: docRes?.data || [],
-  doctor_assignments: assignRes?.data || [],
-  samples: smpRes?.data || [],
-  office_sample_balances: officeRes?.data || [],
-  member_sample_inventory: invRes?.data || [],
-  sample_pickups: pickRes?.data || [],
-  field_sessions: sessRes?.data || [],
-  quota_variances: varRes?.data || [],
-  visits: visRes?.data || [],
-  plans: planRes?.data || [],
-  gift_requests: giftRes?.data || [],
-  day_off_requests: dayRes?.data || [],
-  tasks: taskRes?.data || [],
-  notifications: notifRes?.data || []
-};
+      const previousActiveId = activeUserId;
+      appState = {
+        schedule_rules: ruleRes?.data || { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
+        allowlist: allowRes?.data || [],
+        profiles,
+        doctors: docRes?.data || [],
+        doctor_assignments: assignRes?.data || [],
+        samples: smpRes?.data || [],
+        office_sample_balances: officeRes?.data || [],
+        member_sample_inventory: invRes?.data || [],
+        sample_pickups: pickRes?.data || [],
+        field_sessions: sessRes?.data || [],
+        quota_variances: varRes?.data || [],
+        visits: visRes?.data || [],
+        plans: planRes?.data || [],
+        gift_requests: giftRes?.data || [],
+        day_off_requests: dayRes?.data || [],
+        tasks: taskRes?.data || [],
+        notifications: notifRes?.data || []
+      };
 
       activeUserId = (previousActiveId && profiles.some(p => p.id === previousActiveId))
         ? previousActiveId
@@ -813,7 +811,7 @@ appState = {
       try {
         const user = currentUser();
         const isSup = user?.role === "supervisor";
-const isPlatformAdmin = user?.is_platform_admin === true;
+        const isPlatformAdmin = user?.is_platform_admin === true;
         let needHeader = false;
         let needTasksBanner = false;
         let needNotifs = false;
@@ -855,7 +853,7 @@ const isPlatformAdmin = user?.is_platform_admin === true;
             }
             case "visits": {
               const { data, error } = await sb.from("visits")
-                .select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at")
+                .select("id, member_id, doctor_id, visit_type, sample_id, sample_qty, visit_date, notes, variance_id, created_at, cancelled_at, cancelled_by, cancellation_reason")
                 .order("created_at", { ascending: false }).limit(500);
               if (error) console.error("Realtime visits error:", error);
               else if (data) {
@@ -888,36 +886,36 @@ const isPlatformAdmin = user?.is_platform_admin === true;
               break;
             }
             case "samples": {
-  const { data, error } = await sb.from("samples")
-    .select("id, name, unit, category, office_total_taken, is_active")
-    .order("name");
-  if (error) console.error("Realtime samples error:", error);
-  else if (data) {
-    appState.samples = data;
-    if ((isSup && activeTab <= 1) || (!isSup && (activeTab === 0 || activeTab === 1 || activeTab === 3))) needMain = true;
-  }
+              const { data, error } = await sb.from("samples")
+                .select("id, name, unit, category, office_total_taken, is_active")
+                .order("name");
+              if (error) console.error("Realtime samples error:", error);
+              else if (data) {
+                appState.samples = data;
+                if ((isSup && activeTab <= 1) || (!isSup && (activeTab === 0 || activeTab === 1 || activeTab === 3))) needMain = true;
+              }
 
-  if (isPlatformAdmin) {
-    const officeRes = await sb.rpc("get_office_sample_balances");
-    if (officeRes.error) console.error("Realtime office stock error:", officeRes.error);
-    else {
-      appState.office_sample_balances = officeRes.data || [];
-      needMain = true;
-    }
-  }
-  break;
-}
-case "office_sample_balances": {
-  if (isPlatformAdmin) {
-    const { data, error } = await sb.rpc("get_office_sample_balances");
-    if (error) console.error("Realtime office stock error:", error);
-    else {
-      appState.office_sample_balances = data || [];
-      needMain = true;
-    }
-  }
-  break;
-}
+              if (isPlatformAdmin) {
+                const officeRes = await sb.rpc("get_office_sample_balances");
+                if (officeRes.error) console.error("Realtime office stock error:", officeRes.error);
+                else {
+                  appState.office_sample_balances = officeRes.data || [];
+                  needMain = true;
+                }
+              }
+              break;
+            }
+            case "office_sample_balances": {
+              if (isPlatformAdmin) {
+                const { data, error } = await sb.rpc("get_office_sample_balances");
+                if (error) console.error("Realtime office stock error:", error);
+                else {
+                  appState.office_sample_balances = data || [];
+                  needMain = true;
+                }
+              }
+              break;
+            }
             case "member_sample_inventory": {
               const { data, error } = await sb.from("member_sample_inventory")
                 .select("member_id, sample_id, stock");
@@ -929,27 +927,27 @@ case "office_sample_balances": {
               break;
             }
             case "sample_pickups": {
-  const { data, error } = await sb.from("sample_pickups")
-    .select("id, member_id, sample_id, quantity, note, created_at")
-    .order("created_at", { ascending: false }).limit(200);
+              const { data, error } = await sb.from("sample_pickups")
+                .select("id, member_id, sample_id, quantity, note, created_at")
+                .order("created_at", { ascending: false }).limit(200);
 
-  if (error) {
-    console.error("Realtime pickups error:", error);
-  } else if (data) {
-    appState.sample_pickups = data;
-    if (!isSup && activeTab === 3) needMain = true;
-  }
+              if (error) {
+                console.error("Realtime pickups error:", error);
+              } else if (data) {
+                appState.sample_pickups = data;
+                if (!isSup && activeTab === 3) needMain = true;
+              }
 
-  if (isPlatformAdmin) {
-    const officeRes = await sb.rpc("get_office_sample_balances");
-    if (officeRes.error) console.error("Office stock refresh error:", officeRes.error);
-    else {
-      appState.office_sample_balances = officeRes.data || [];
-      needMain = true;
-    }
-  }
-  break;
-}
+              if (isPlatformAdmin) {
+                const officeRes = await sb.rpc("get_office_sample_balances");
+                if (officeRes.error) console.error("Office stock refresh error:", officeRes.error);
+                else {
+                  appState.office_sample_balances = officeRes.data || [];
+                  needMain = true;
+                }
+              }
+              break;
+            }
             case "field_sessions": {
               const { data, error } = await sb.from("field_sessions")
                 .select("id, member_id, started_at, ended_at, duration_sec")
@@ -1339,7 +1337,7 @@ case "office_sample_balances": {
               default: result = { error: { message: `Unsupported queued action: ${item.type || "unknown"}`, code: "UNSUPPORTED_QUEUE_ACTION" } };
             }
           } catch (err) { result = { error: err }; }
-                    if (result?.error) {
+          if (result?.error) {
             console.error(`[Offline sync ${item.type}]`, result.error);
 
             if (
@@ -1740,7 +1738,7 @@ case "office_sample_balances": {
               const rep = appState.profiles.find(p => p.id === v.member_id)?.full_name || "";
               const doc = appState.doctors.find(d => d.id === v.doctor_id)?.name || "";
               const smp = appState.samples.find(s => s.id === v.sample_id)?.name || "None";
-              return `<tr class="border-b border-slate-200"><td class="p-2 tabular-nums">${v.visit_date}</td><td class="p-2">${rep}</td><td class="p-2">${escapeHtml(doc)}</td><td class="p-2">${v.visit_type}</td><td class="p-2 tabular-nums">${v.sample_qty} × ${escapeHtml(smp)}</td><td class="p-2">${escapeHtml(v.notes || "")}</td></tr>`;
+              return `<tr class="border-b border-slate-200"><td class="p-2 tabular-nums">${v.visit_date}</td><td class="p-2">${escapeHtml(rep)}</td><td class="p-2">${escapeHtml(doc)}</td><td class="p-2">${escapeHtml(v.visit_type)}</td><td class="p-2 tabular-nums">${v.sample_qty} × ${escapeHtml(smp)}</td><td class="p-2">${escapeHtml(v.notes || "")}</td></tr>`;
             }).join("")}
           </tbody>
         </table>
@@ -1936,7 +1934,7 @@ case "office_sample_balances": {
                   const smp = appState.samples.find(s => s.id === v.sample_id);
                   const ageMin = Math.floor((Date.now() - new Date(v.created_at).getTime()) / 60000);
                   const editable = ageMin < 60 && !v.cancelled_at;
-const cancelled = !!v.cancelled_at;
+                  const cancelled = !!v.cancelled_at;
                   const variance = v.variance_id ? appState.quota_variances.find(q => q.id === v.variance_id) : null;
                   const rejected = variance && variance.status === "Rejected";
 
@@ -1948,19 +1946,19 @@ const cancelled = !!v.cancelled_at;
                           <p class="text-[11px] text-slate-500 tabular-nums">${escapeHtml(v.visit_type)} · ${v.visit_date}</p>
                         </div>
                         <div class="flex flex-col items-end gap-1.5">
-  ${editable
-    ? `<button onclick="openEditVisitModal('${v.id}')" class="text-[11px] font-semibold px-2 py-1 rounded-lg bg-white border border-slate-200 text-indigo-700 hover:bg-indigo-50 tabular-nums">Edit (${60 - ageMin}m left)</button>`
-    : `<span class="text-[10px] font-medium text-slate-400 tabular-nums">${cancelled ? "Cancelled" : "Edit Locked (>1h)"}</span>`}
-  ${!cancelled
-    ? `<button onclick="cancelVisit('${v.id}')" class="text-[11px] font-semibold px-2 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 hover:bg-rose-50">Cancel Visit</button>`
-    : ""}
-</div>
+                          ${editable
+                            ? `<button onclick="openEditVisitModal('${v.id}')" class="text-[11px] font-semibold px-2 py-1 rounded-lg bg-white border border-slate-200 text-indigo-700 hover:bg-indigo-50 tabular-nums">Edit (${60 - ageMin}m left)</button>`
+                            : `<span class="text-[10px] font-medium text-slate-400 tabular-nums">${cancelled ? "Cancelled" : "Edit Locked (>1h)"}</span>`}
+                          ${!cancelled
+                            ? `<button onclick="cancelVisit('${v.id}')" class="text-[11px] font-semibold px-2 py-1 rounded-lg bg-white border border-rose-200 text-rose-700 hover:bg-rose-50">Cancel Visit</button>`
+                            : ""}
+                        </div>
                       </div>
                       ${rejected ? `<span class="inline-block mt-1.5 text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-600 text-white">Rejected Variance</span>` : ""}
-${cancelled ? `<span class="inline-block mt-1.5 text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-600 text-white">Cancelled</span>` : ""}
-${cancelled && v.cancellation_reason ? `<p class="text-[11px] text-slate-500 mt-1">Cancellation reason: ${escapeHtml(v.cancellation_reason)}</p>` : ""}
+                      ${cancelled ? `<span class="inline-block mt-1.5 text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-600 text-white">Cancelled</span>` : ""}
+                      ${cancelled && v.cancellation_reason ? `<p class="text-[11px] text-slate-500 mt-1">Cancellation reason: ${escapeHtml(v.cancellation_reason)}</p>` : ""}
                       <p class="text-xs text-slate-700 mt-2 tabular-nums">
-                        ${smp && v.sample_qty > 0 ? `Sample: <strong>${v.sample_qty} ${smp.unit}</strong> ${escapeHtml(smp.name)}` : "No sample given"}
+                        ${smp && v.sample_qty > 0 ? `Sample: <strong>${v.sample_qty} ${escapeHtml(smp.unit)}</strong> ${escapeHtml(smp.name)}` : "No sample given"}
                       </p>
                       ${v.notes ? `<p class="text-[11px] text-slate-500 mt-1">${escapeHtml(v.notes)}</p>` : ""}
                     </div>
@@ -2195,88 +2193,89 @@ ${cancelled && v.cancellation_reason ? `<p class="text-[11px] text-slate-500 mt-
         })();
       }
     }
-async function cancelVisit(visitId) {
-  const user = currentUser();
-  if (!user) return;
 
-  const visit = appState.visits.find(v => v.id === visitId);
-  if (!visit) return showToast("Visit not found.", "rose");
+    async function cancelVisit(visitId) {
+      const user = currentUser();
+      if (!user) return;
 
-  if (visit.cancelled_at) {
-  return showToast("This visit is already cancelled.", "amber");
-}
+      const visit = appState.visits.find(v => v.id === visitId);
+      if (!visit) return showToast("Visit not found.", "rose");
 
-const visitPendingSync = offlineQueue.some(item =>
-  item.type === "visit" &&
-  item.payload?.p_client_temp_id === visitId
-);
+      if (visit.cancelled_at) {
+        return showToast("This visit is already cancelled.", "amber");
+      }
 
-if (visitPendingSync) {
-  return showToast(
-    "This visit is still awaiting sync. Please sync it before cancelling.",
-    "amber"
-  );
-}
-if (offlineQueue.some(item =>
-  item.type === "cancel_visit" &&
-  item.payload?.p_visit_id === visitId
-)) {
-  return showToast("This cancellation is already queued.", "amber");
-}
+      const visitPendingSync = offlineQueue.some(item =>
+        item.type === "visit" &&
+        item.payload?.p_client_temp_id === visitId
+      );
 
-  const reason = prompt("Reason for cancelling this visit:");
-  if (reason === null) return;
+      if (visitPendingSync) {
+        return showToast(
+          "This visit is still awaiting sync. Please sync it before cancelling.",
+          "amber"
+        );
+      }
+      if (offlineQueue.some(item =>
+        item.type === "cancel_visit" &&
+        item.payload?.p_visit_id === visitId
+      )) {
+        return showToast("This cancellation is already queued.", "amber");
+      }
 
-  const cleanReason = reason.trim();
-  if (!cleanReason) {
-    return showToast("Please enter a cancellation reason.", "amber");
-  }
+      const reason = prompt("Reason for cancelling this visit:");
+      if (reason === null) return;
 
-  const rpcPayload = {
-    p_request_id: uid("cancel"),
-    p_visit_id: visitId,
-    p_reason: cleanReason
-  };
+      const cleanReason = reason.trim();
+      if (!cleanReason) {
+        return showToast("Please enter a cancellation reason.", "amber");
+      }
 
-  if (isCurrentlyOffline()) {
-  queueOfflineAction({
-    type: "cancel_visit",
-    label: `Cancel visit (${visit.visit_date})`,
-    payload: rpcPayload
-  });
+      const rpcPayload = {
+        p_request_id: uid("cancel"),
+        p_visit_id: visitId,
+        p_reason: cleanReason
+      };
 
-  saveLocalState();
-  renderMain();
-  showToast("Cancellation queued; awaiting server confirmation.", "amber");
-  return;
-}
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({
+          type: "cancel_visit",
+          label: `Cancel visit (${visit.visit_date})`,
+          payload: rpcPayload
+        });
 
-  const result = await runSbWrite(
-    "rpc.cancel_visit_atomic",
-    () => sb.rpc("cancel_visit_atomic", rpcPayload),
-    { notifyToast: true }
-  );
+        saveLocalState();
+        renderMain();
+        showToast("Cancellation queued; awaiting server confirmation.", "amber");
+        return;
+      }
 
-  if (result?.error || result?.skipped) return;
+      const result = await runSbWrite(
+        "rpc.cancel_visit_atomic",
+        () => sb.rpc("cancel_visit_atomic", rpcPayload),
+        { notifyToast: true }
+      );
 
-  visit.cancelled_at = new Date().toISOString();
-  visit.cancellation_reason = cleanReason;
-  visit.cancelled_by = user.id;
+      if (result?.error || result?.skipped) return;
 
-  await refreshTablesBatch([
-    "visits",
-    "member_sample_inventory"
-  ]);
+      visit.cancelled_at = new Date().toISOString();
+      visit.cancellation_reason = cleanReason;
+      visit.cancelled_by = user.id;
 
-  showToast("Visit cancelled and sample stock restored.", "emerald");
-}
+      await refreshTablesBatch([
+        "visits",
+        "member_sample_inventory"
+      ]);
+
+      showToast("Visit cancelled and sample stock restored.", "emerald");
+    }
 
     function openEditVisitModal(visitId) {
       const v = appState.visits.find(x => x.id === visitId);
       if (!v) return;
-if (v.cancelled_at) {
-  return showToast("Cancelled visits cannot be edited.", "amber");
-}
+      if (v.cancelled_at) {
+        return showToast("Cancelled visits cannot be edited.", "amber");
+      }
       openModal(`
         <h3 class="text-base font-bold text-slate-900 mb-3">Edit Recent Visit</h3>
         <div class="space-y-3 text-xs">
@@ -2302,9 +2301,9 @@ if (v.cancelled_at) {
     function saveEditedVisit(visitId) {
       const v = appState.visits.find(x => x.id === visitId);
       if (!v) return;
-if (v.cancelled_at) {
-  return showToast("Cancelled visits cannot be edited.", "amber");
-}
+      if (v.cancelled_at) {
+        return showToast("Cancelled visits cannot be edited.", "amber");
+      }
       v.visit_type = document.getElementById("edit-vis-type")?.value || v.visit_type;
       v.notes = (document.getElementById("edit-vis-notes")?.value || "").trim();
 
@@ -2375,9 +2374,9 @@ if (v.cancelled_at) {
                     const low = rem <= 6;
                     return `
                       <tr>
-                        <td class="py-2.5 font-semibold text-slate-900">${s.name}</td>
-                        <td class="py-2.5">${used} ${s.unit}</td>
-                        <td class="py-2.5 font-bold">${rem} ${s.unit}</td>
+                        <td class="py-2.5 font-semibold text-slate-900">${escapeHtml(s.name)}</td>
+                        <td class="py-2.5">${used} ${escapeHtml(s.unit)}</td>
+                        <td class="py-2.5 font-bold">${rem} ${escapeHtml(s.unit)}</td>
                         <td class="py-2.5">${low ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700">Low Stock</span>` : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700">Healthy</span>`}</td>
                       </tr>
                     `;
@@ -2390,7 +2389,7 @@ if (v.cancelled_at) {
               <h3 class="text-sm font-bold text-slate-900 mb-3">My Gift & Day-Off Requests Summary</h3>
               <div class="space-y-2 text-xs">
                 ${myGifts.map(g => `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 flex justify-between"><span>Gift: <strong>${escapeHtml(g.gift_details)}</strong></span><span class="font-semibold text-indigo-700">${escapeHtml(g.status)}</span></div>`).join("")}
-                ${myDays.map(d => `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 flex justify-between tabular-nums"><span>Day Off: <strong>${d.requested_date}</strong></span><span class="font-semibold text-amber-700">${d.status}</span></div>`).join("")}
+                ${myDays.map(d => `<div class="p-3 rounded-xl bg-slate-50 border border-slate-200 flex justify-between tabular-nums"><span>Day Off: <strong>${escapeHtml(d.requested_date)}</strong></span><span class="font-semibold text-amber-700">${escapeHtml(d.status)}</span></div>`).join("")}
                 ${myGifts.length + myDays.length === 0 ? `<p class="text-slate-500 py-6 text-center">No requests submitted yet.</p>` : ""}
               </div>
             </div>
@@ -2501,7 +2500,7 @@ if (v.cancelled_at) {
                   ${assignedDocs.map(d => `
                     <label class="flex items-center gap-2 p-1 hover:bg-slate-50 rounded-lg cursor-pointer">
                       <input type="checkbox" class="plan-doc-cb" value="${d.id}" />
-                      <span>${d.name} <span class="text-slate-400">(${d.specialty})</span></span>
+                      <span>${escapeHtml(d.name)} <span class="text-slate-400">(${escapeHtml(d.specialty)})</span></span>
                     </label>
                   `).join("")}
                 </div>
@@ -2511,7 +2510,7 @@ if (v.cancelled_at) {
                 <div class="space-y-1.5">
                   ${activeSamples.map(s => `
                     <div class="flex items-center justify-between gap-2">
-                      <span class="text-slate-700">${s.name}</span>
+                      <span class="text-slate-700">${escapeHtml(s.name)}</span>
                       <input type="number" min="0" placeholder="0" data-plan-sample="${s.id}" class="w-20 rounded-lg border border-slate-300 px-2 py-1 text-right tabular-nums" />
                     </div>
                   `).join("")}
@@ -2537,7 +2536,7 @@ if (v.cancelled_at) {
                     <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
                       <div>
                         <span class="text-xs font-bold px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 mr-2">${escapeHtml(p.plan_type)}</span>
-                        <span class="text-sm font-bold text-slate-900">${p.plan_name}</span>
+                        <span class="text-sm font-bold text-slate-900">${escapeHtml(p.plan_name)}</span>
                       </div>
                       <span class="text-xs text-slate-500 tabular-nums">Expected Entry: <strong>${escapeHtml(p.expected_entry_time)}</strong></span>
                     </div>
@@ -2547,7 +2546,7 @@ if (v.cancelled_at) {
                       <div class="p-3 rounded-xl bg-amber-50 border border-amber-200"><p class="text-[11px] text-amber-800">Rollover / Remaining</p><p class="text-lg font-bold text-amber-900">${rolloverIds.length}</p></div>
                       <div class="p-3 rounded-xl bg-slate-50 border border-slate-200"><p class="text-[11px] text-slate-500">Planned Office Samples</p><p class="text-lg font-bold">${totalOfficeSamples}</p></div>
                     </div>
-                    <p class="text-xs text-slate-600"><strong>Rollover Doctors:</strong> ${rolloverNames.length ? rolloverNames.join(", ") : "All planned doctors visited!"}</p>
+                    <p class="text-xs text-slate-600"><strong>Rollover Doctors:</strong> ${rolloverNames.length ? escapeHtml(rolloverNames.join(", ")) : "All planned doctors visited!"}</p>
                   </div>
                 `;
               }).join("")}
@@ -2656,7 +2655,7 @@ if (v.cancelled_at) {
         <div class="space-y-6">
           ${lowItems.length > 0 ? `
             <div class="p-4 rounded-2xl bg-rose-50 border border-rose-300 text-rose-900 text-xs font-semibold">
-              Low-Stock Warning: ${lowItems.map(s => s.name).join(", ")} at or below 6 units. Request restock from the office.
+              Low-Stock Warning: ${lowItems.map(s => escapeHtml(s.name)).join(", ")} at or below 6 units. Request restock from the office.
             </div>
           ` : ""}
 
@@ -2701,10 +2700,10 @@ if (v.cancelled_at) {
                     const projected = Math.max(0, cur - remVisitsToday);
                     return `
                       <tr>
-                        <td class="py-3 font-semibold text-slate-900">${s.name}</td>
-                        <td class="py-3 text-slate-500">${s.category}</td>
-                        <td class="py-3 font-bold ${cur <= 6 ? "text-rose-600" : "text-slate-900"}">${cur} ${s.unit}</td>
-                        <td class="py-3 font-semibold text-indigo-700">${projected} ${s.unit}</td>
+                        <td class="py-3 font-semibold text-slate-900">${escapeHtml(s.name)}</td>
+                        <td class="py-3 text-slate-500">${escapeHtml(s.category)}</td>
+                        <td class="py-3 font-bold ${cur <= 6 ? "text-rose-600" : "text-slate-900"}">${cur} ${escapeHtml(s.unit)}</td>
+                        <td class="py-3 font-semibold text-indigo-700">${projected} ${escapeHtml(s.unit)}</td>
                       </tr>
                     `;
                   }).join("")}
@@ -2717,65 +2716,65 @@ if (v.cancelled_at) {
     }
 
     async function takeSamplesFromOffice() {
-  const user = currentUser();
-  const sup = supervisorUser();
-  if (!user) return;
+      const user = currentUser();
+      const sup = supervisorUser();
+      if (!user) return;
 
-  const sampleId = document.getElementById("pickup-sample-id")?.value || "";
-  const qty = parseInt(document.getElementById("pickup-qty")?.value || "0", 10);
-  const note = (document.getElementById("pickup-note")?.value || "").trim();
+      const sampleId = document.getElementById("pickup-sample-id")?.value || "";
+      const qty = parseInt(document.getElementById("pickup-qty")?.value || "0", 10);
+      const note = (document.getElementById("pickup-note")?.value || "").trim();
 
-  if (!sampleId || !Number.isInteger(qty) || qty <= 0) {
-    return showToast("Enter a valid quantity.", "amber");
-  }
+      if (!sampleId || !Number.isInteger(qty) || qty <= 0) {
+        return showToast("Enter a valid quantity.", "amber");
+      }
 
-  const smp = appState.samples.find(s => s.id === sampleId);
-  if (!smp) return showToast("Selected sample was not found.", "rose");
+      const smp = appState.samples.find(s => s.id === sampleId);
+      if (!smp) return showToast("Selected sample was not found.", "rose");
 
-  if (!isSupabaseConfigured || !sb) {
-    return showToast("Supabase is unavailable. Pickup was not recorded.", "rose");
-  }
+      if (!isSupabaseConfigured || !sb) {
+        return showToast("Supabase is unavailable. Pickup was not recorded.", "rose");
+      }
 
-  const rpcPayload = {
-    p_request_id: uid("pickup"),
-    p_member_id: user.id,
-    p_sample_id: sampleId,
-    p_qty: qty,
-    p_note: note
-  };
+      const rpcPayload = {
+        p_request_id: uid("pickup"),
+        p_member_id: user.id,
+        p_sample_id: sampleId,
+        p_qty: qty,
+        p_note: note
+      };
 
-  const pickMsg = `${user.full_name} took ${qty} ${smp.unit || "units"} of ${smp.name || "sample"} from office.`;
+      const pickMsg = `${user.full_name} took ${qty} ${smp.unit || "units"} of ${smp.name || "sample"} from office.`;
 
-  if (isCurrentlyOffline()) {
-    queueOfflineAction({
-      type: "pickup",
-      label: `Sample pickup (${qty} ${smp.name || ""})`,
-      payload: rpcPayload
-    });
-    showToast("Pickup saved for syncing when you're online.", "amber");
-    return;
-  }
+      if (isCurrentlyOffline()) {
+        queueOfflineAction({
+          type: "pickup",
+          label: `Sample pickup (${qty} ${smp.name || ""})`,
+          payload: rpcPayload
+        });
+        showToast("Pickup saved for syncing when you're online.", "amber");
+        return;
+      }
 
-  const result = await runSbWrite(
-    "rpc.take_samples_from_office",
-    () => sb.rpc("take_samples_from_office", rpcPayload),
-    { notifyToast: true }
-  );
+      const result = await runSbWrite(
+        "rpc.take_samples_from_office",
+        () => sb.rpc("take_samples_from_office", rpcPayload),
+        { notifyToast: true }
+      );
 
-  if (result?.error || result?.skipped) return;
+      if (result?.error || result?.skipped) return;
 
-  await refreshTablesBatch([
-    "samples",
-    "member_sample_inventory",
-    "sample_pickups"
-  ]);
+      await refreshTablesBatch([
+        "samples",
+        "member_sample_inventory",
+        "sample_pickups"
+      ]);
 
-  showToast("Office sample pickup recorded.", "emerald");
+      showToast("Office sample pickup recorded.", "emerald");
 
-  if (sup && sup.id !== user.id) {
-    pushNotification(sup.id, "Field Rounds", pickMsg);
-  }
-}
+      if (sup && sup.id !== user.id) {
+        pushNotification(sup.id, "Field Rounds", pickMsg);
+      }
+    }
 
     // Tab 5: Gifts & Day-Off
     function renderMemberGiftsDayOffTab() {
@@ -2803,7 +2802,7 @@ if (v.cancelled_at) {
               ${myGifts.map(g => `
                 <div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs">
                   <div class="flex justify-between font-bold">
-                    <span>${g.gift_details} ($${g.estimated_price})</span>
+                    <span>${escapeHtml(g.gift_details)} ($${g.estimated_price})</span>
                     <span class="text-indigo-700">${escapeHtml(g.status)}</span>
                   </div>
                   <p class="text-slate-500 mt-1">Buyer: ${escapeHtml(g.buyer_role)} · ${escapeHtml(g.reason || "")}</p>
@@ -2828,10 +2827,10 @@ if (v.cancelled_at) {
               ${myDays.map(d => `
                 <div class="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs flex items-center justify-between">
                   <div>
-                    <p class="font-bold tabular-nums">${d.requested_date}</p>
-                    <p class="text-slate-500">${d.reason || ""}</p>
+                    <p class="font-bold tabular-nums">${escapeHtml(d.requested_date)}</p>
+                    <p class="text-slate-500">${escapeHtml(d.reason || "")}</p>
                   </div>
-                  <span class="px-2.5 py-1 rounded-full font-semibold bg-amber-50 text-amber-800 border border-amber-200">${d.status}</span>
+                  <span class="px-2.5 py-1 rounded-full font-semibold bg-amber-50 text-amber-800 border border-amber-200">${escapeHtml(d.status)}</span>
                 </div>
               `).join("")}
             </div>
@@ -3021,10 +3020,10 @@ if (v.cancelled_at) {
                       : (r.last_round_duration_sec || 0);
                     return `
                       <tr>
-                        <td class="py-2.5 font-semibold text-slate-900">${r.full_name}</td>
-                        <td class="py-2.5 text-slate-600">${r.region}</td>
+                        <td class="py-2.5 font-semibold text-slate-900">${escapeHtml(r.full_name)}</td>
+                        <td class="py-2.5 text-slate-600">${escapeHtml(r.region)}</td>
                         <td class="py-2.5 font-bold">${cnt} / ${rules.daily_target}</td>
-                        <td class="py-2.5"><span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${statusBadge[r.live_status] || statusBadge["Inactive Yet"]}">${r.live_status}</span></td>
+                        <td class="py-2.5"><span class="px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${statusBadge[r.live_status] || statusBadge["Inactive Yet"]}">${escapeHtml(r.live_status)}</span></td>
                         <td class="py-2.5 font-semibold" ${r.live_status === "In the Field" && r.active_round_started_at ? `data-live-start="${r.active_round_started_at}"` : ""}>${formatDuration(sec)}</td>
                       </tr>
                     `;
@@ -3047,10 +3046,10 @@ if (v.cancelled_at) {
                     <div class="p-3 rounded-xl border text-xs ${rejected ? "border-rose-400 bg-rose-50" : "border-slate-200 bg-slate-50"}">
                       <div class="flex justify-between font-bold text-slate-900">
                         <span>${escapeHtml(rep)}</span>
-                        <span class="text-slate-500 font-normal tabular-nums">${v.visit_date}</span>
+                        <span class="text-slate-500 font-normal tabular-nums">${escapeHtml(v.visit_date)}</span>
                       </div>
-                      <p class="text-indigo-700 font-semibold mt-0.5">${doc?.name || ""} (${doc?.location || ""}) · ${v.visit_type}</p>
-                      <p class="text-slate-700 mt-1 tabular-nums">${smp && v.sample_qty > 0 ? `${v.sample_qty} ${smp.unit} ${escapeHtml(smp.name)}` : "No samples"}</p>
+                      <p class="text-indigo-700 font-semibold mt-0.5">${escapeHtml(doc?.name || "")} (${escapeHtml(doc?.location || "")}) · ${escapeHtml(v.visit_type)}</p>
+                      <p class="text-slate-700 mt-1 tabular-nums">${smp && v.sample_qty > 0 ? `${v.sample_qty} ${escapeHtml(smp.unit)} ${escapeHtml(smp.name)}` : "No samples"}</p>
                       ${v.notes ? `<p class="text-slate-500 mt-1">${escapeHtml(v.notes)}</p>` : ""}
                     </div>
                   `;
@@ -3121,17 +3120,17 @@ if (v.cancelled_at) {
                   <div class="py-2.5 flex items-center justify-between gap-2 ${s.is_active ? "" : "opacity-50"}">
                     <div>
                       <p class="font-bold text-slate-900">${escapeHtml(s.name)} (${escapeHtml(s.unit)})</p>
-                     <p class="text-slate-500">
-  ${escapeHtml(s.category)}
-  · Office Stock: <strong>${appState.office_sample_balances.find(b => b.sample_id === s.id)?.on_hand ?? 0}</strong>
-  · Taken from Office: <strong>${s.office_total_taken || 0}</strong>
-</p>
+                      <p class="text-slate-500">
+                        ${escapeHtml(s.category)}
+                        · Office Stock: <strong>${appState.office_sample_balances.find(b => b.sample_id === s.id)?.on_hand ?? 0}</strong>
+                        · Taken from Office: <strong>${s.office_total_taken || 0}</strong>
+                      </p>
                     </div>
                     <div class="flex gap-2">
-${currentUser()?.is_platform_admin === true ? `
-  <button onclick="receiveOfficeSampleStock('${s.id}')" class="px-3 py-1.5 rounded-lg bg-emerald-100 text-emerald-700 text-xs font-bold">Receive</button>
-  <button onclick="adjustOfficeSampleStock('${s.id}')" class="px-3 py-1.5 rounded-lg bg-amber-100 text-amber-700 text-xs font-bold">Adjust</button>
-` : ""}
+                      ${currentUser()?.is_platform_admin === true ? `
+                        <button onclick="receiveOfficeSampleStock('${s.id}')" class="px-3 py-1.5 rounded-lg bg-emerald-100 text-emerald-700 text-xs font-bold">Receive</button>
+                        <button onclick="adjustOfficeSampleStock('${s.id}')" class="px-3 py-1.5 rounded-lg bg-amber-100 text-amber-700 text-xs font-bold">Adjust</button>
+                      ` : ""}
                       <button onclick="openEditSampleModal('${s.id}')" class="text-indigo-600 hover:underline font-semibold">Edit</button>
                       <button onclick="toggleSampleActive('${s.id}')" class="text-rose-600 hover:underline font-semibold">${s.is_active ? "Archive" : "Restore"}</button>
                     </div>
@@ -3154,7 +3153,7 @@ ${currentUser()?.is_platform_admin === true ? `
                 </select>
                 <select onchange="bulkFilterSpec=this.value; renderMain();" class="rounded-xl border border-slate-300 px-3 py-1.5">
                   <option value="ALL">All Specialties</option>
-                  ${specialties.map(sp => `<option value="${sp}" ${sp === bulkFilterSpec ? "selected" : ""}>${sp}</option>`).join("")}
+                  ${specialties.map(sp => `<option value="${sp}" ${sp === bulkFilterSpec ? "selected" : ""}>${escapeHtml(sp)}</option>`).join("")}
                 </select>
                 <button type="button" onclick="toggleBulkCheckboxes(true)" class="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold">Select Filtered</button>
                 <button type="button" onclick="toggleBulkCheckboxes(false)" class="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 font-semibold">Clear Filtered</button>
@@ -3211,12 +3210,12 @@ ${currentUser()?.is_platform_admin === true ? `
       openModal(`
         <h3 class="text-base font-bold text-slate-900 mb-3">Edit Master Doctor</h3>
         <div class="space-y-2.5 text-xs">
-          <input id="ed-doc-name" type="text" value="${d.name}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
-          <input id="ed-doc-spec" type="text" value="${d.specialty}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <input id="ed-doc-name" type="text" value="${escapeHtml(d.name)}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <input id="ed-doc-spec" type="text" value="${escapeHtml(d.specialty)}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
           <select id="ed-doc-loc" class="w-full rounded-xl border border-slate-300 px-3 py-2">
             ${REGIONS.map(r => `<option value="${r}" ${r === d.location ? "selected" : ""}>${r}</option>`).join("")}
           </select>
-          <input id="ed-doc-tier" type="text" value="${d.tier_clinic}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <input id="ed-doc-tier" type="text" value="${escapeHtml(d.tier_clinic)}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
         </div>
         <div class="flex justify-end gap-2 mt-4">
           <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
@@ -3304,128 +3303,130 @@ ${currentUser()?.is_platform_admin === true ? `
         })();
       }
     }
-async function receiveOfficeSampleStock(sampleId) {
-  const user = currentUser();
 
-  if (!user?.is_platform_admin) {
-    return showToast("Only the platform admin can receive office stock.", "rose");
-  }
+    async function receiveOfficeSampleStock(sampleId) {
+      const user = currentUser();
 
-  if (!sb || !isSupabaseConfigured || isCurrentlyOffline()) {
-    return showToast("Connect to the internet before receiving stock.", "amber");
-  }
+      if (!user?.is_platform_admin) {
+        return showToast("Only the platform admin can receive office stock.", "rose");
+      }
 
-  const sample = appState.samples.find(s => s.id === sampleId);
-  if (!sample) return showToast("Sample not found.", "rose");
+      if (!sb || !isSupabaseConfigured || isCurrentlyOffline()) {
+        return showToast("Connect to the internet before receiving stock.", "amber");
+      }
 
-  const qtyInput = prompt(`How many ${sample.unit} of ${sample.name} were received?`);
-  if (qtyInput === null) return;
+      const sample = appState.samples.find(s => s.id === sampleId);
+      if (!sample) return showToast("Sample not found.", "rose");
 
-  const qty = Number(qtyInput.trim());
+      const qtyInput = prompt(`How many ${sample.unit} of ${sample.name} were received?`);
+      if (qtyInput === null) return;
 
-  if (!Number.isInteger(qty) || qty < 1 || qty > 1000000) {
-    return showToast("Enter a valid positive whole quantity.", "amber");
-  }
+      const qty = Number(qtyInput.trim());
 
-  const note = prompt("Receipt reference or note (optional):");
-  if (note === null) return;
+      if (!Number.isInteger(qty) || qty < 1 || qty > 1000000) {
+        return showToast("Enter a valid positive whole quantity.", "amber");
+      }
 
-  const payload = {
-    p_request_id: uid("receipt"),
-    p_sample_id: sampleId,
-    p_qty: qty,
-    p_note: note.trim()
-  };
+      const note = prompt("Receipt reference or note (optional):");
+      if (note === null) return;
 
-  const result = await runSbWrite(
-    "rpc.receive_samples_into_office",
-    () => sb.rpc("receive_samples_into_office", payload),
-    { notifyToast: true }
-  );
+      const payload = {
+        p_request_id: uid("receipt"),
+        p_sample_id: sampleId,
+        p_qty: qty,
+        p_note: note.trim()
+      };
 
-  if (result?.error || result?.skipped) return;
+      const result = await runSbWrite(
+        "rpc.receive_samples_into_office",
+        () => sb.rpc("receive_samples_into_office", payload),
+        { notifyToast: true }
+      );
 
-  const refresh = await sb.rpc("get_office_sample_balances");
+      if (result?.error || result?.skipped) return;
 
-  if (refresh.error) {
-    console.error("Office stock refresh failed:", refresh.error);
-    return showToast("Receipt saved, but stock display could not refresh. Reload the app.", "amber");
-  }
+      const refresh = await sb.rpc("get_office_sample_balances");
 
-  appState.office_sample_balances = refresh.data || [];
-  saveLocalState();
-  renderMain();
+      if (refresh.error) {
+        console.error("Office stock refresh failed:", refresh.error);
+        return showToast("Receipt saved, but stock display could not refresh. Reload the app.", "amber");
+      }
 
-  showToast(`${qty} ${sample.unit} received into office stock.`, "emerald");
-}
-async function adjustOfficeSampleStock(sampleId) {
-  const user = currentUser();
+      appState.office_sample_balances = refresh.data || [];
+      saveLocalState();
+      renderMain();
 
-  if (!user?.is_platform_admin) {
-    return showToast("Only the platform admin can adjust office stock.", "rose");
-  }
+      showToast(`${qty} ${sample.unit} received into office stock.`, "emerald");
+    }
 
-  if (!sb || !isSupabaseConfigured || isCurrentlyOffline()) {
-    return showToast("Connect to the internet before adjusting stock.", "amber");
-  }
+    async function adjustOfficeSampleStock(sampleId) {
+      const user = currentUser();
 
-  const sample = appState.samples.find(s => s.id === sampleId);
-  if (!sample) return showToast("Sample not found.", "rose");
+      if (!user?.is_platform_admin) {
+        return showToast("Only the platform admin can adjust office stock.", "rose");
+      }
 
-  const currentStock = appState.office_sample_balances
-    .find(b => b.sample_id === sampleId)?.on_hand ?? 0;
+      if (!sb || !isSupabaseConfigured || isCurrentlyOffline()) {
+        return showToast("Connect to the internet before adjusting stock.", "amber");
+      }
 
-  const deltaInput = prompt(
-    `Current office stock: ${currentStock} ${sample.unit}\n\nEnter adjustment:\nPositive number = add stock\nNegative number = remove stock`
-  );
+      const sample = appState.samples.find(s => s.id === sampleId);
+      if (!sample) return showToast("Sample not found.", "rose");
 
-  if (deltaInput === null) return;
+      const currentStock = appState.office_sample_balances
+        .find(b => b.sample_id === sampleId)?.on_hand ?? 0;
 
-  const delta = Number(deltaInput.trim());
+      const deltaInput = prompt(
+        `Current office stock: ${currentStock} ${sample.unit}\n\nEnter adjustment:\nPositive number = add stock\nNegative number = remove stock`
+      );
 
-  if (!Number.isInteger(delta) || delta === 0 || Math.abs(delta) > 1000000) {
-    return showToast("Enter a valid non-zero whole number.", "amber");
-  }
+      if (deltaInput === null) return;
 
-  if (currentStock + delta < 0) {
-    return showToast("Adjustment cannot make office stock negative.", "rose");
-  }
+      const delta = Number(deltaInput.trim());
 
-  const note = prompt("Enter the reason for this stock adjustment:");
-  if (note === null) return;
+      if (!Number.isInteger(delta) || delta === 0 || Math.abs(delta) > 1000000) {
+        return showToast("Enter a valid non-zero whole number.", "amber");
+      }
 
-  if (!note.trim()) {
-    return showToast("An adjustment reason is required.", "amber");
-  }
+      if (currentStock + delta < 0) {
+        return showToast("Adjustment cannot make office stock negative.", "rose");
+      }
 
-  const payload = {
-    p_request_id: uid("adjust"),
-    p_sample_id: sampleId,
-    p_delta: delta,
-    p_note: note.trim()
-  };
+      const note = prompt("Enter the reason for this stock adjustment:");
+      if (note === null) return;
 
-  const result = await runSbWrite(
-    "rpc.adjust_office_sample_stock",
-    () => sb.rpc("adjust_office_sample_stock", payload),
-    { notifyToast: true }
-  );
+      if (!note.trim()) {
+        return showToast("An adjustment reason is required.", "amber");
+      }
 
-  if (result?.error || result?.skipped) return;
+      const payload = {
+        p_request_id: uid("adjust"),
+        p_sample_id: sampleId,
+        p_delta: delta,
+        p_note: note.trim()
+      };
 
-  const refresh = await sb.rpc("get_office_sample_balances");
+      const result = await runSbWrite(
+        "rpc.adjust_office_sample_stock",
+        () => sb.rpc("adjust_office_sample_stock", payload),
+        { notifyToast: true }
+      );
 
-  if (refresh.error) {
-    console.error("Office stock refresh failed:", refresh.error);
-    return showToast("Adjustment saved, but stock display could not refresh. Reload the app.", "amber");
-  }
+      if (result?.error || result?.skipped) return;
 
-  appState.office_sample_balances = refresh.data || [];
-  saveLocalState();
-  renderMain();
+      const refresh = await sb.rpc("get_office_sample_balances");
 
-  showToast("Office stock adjustment recorded.", "emerald");
-}
+      if (refresh.error) {
+        console.error("Office stock refresh failed:", refresh.error);
+        return showToast("Adjustment saved, but stock display could not refresh. Reload the app.", "amber");
+      }
+
+      appState.office_sample_balances = refresh.data || [];
+      saveLocalState();
+      renderMain();
+
+      showToast("Office stock adjustment recorded.", "emerald");
+    }
 
     function openEditSampleModal(smpId) {
       const s = appState.samples.find(x => x.id === smpId);
@@ -3433,9 +3434,9 @@ async function adjustOfficeSampleStock(sampleId) {
       openModal(`
         <h3 class="text-base font-bold text-slate-900 mb-3">Edit Master Sample</h3>
         <div class="space-y-2.5 text-xs">
-          <input id="ed-smp-name" type="text" value="${s.name}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
-          <input id="ed-smp-unit" type="text" value="${s.unit}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
-          <input id="ed-smp-cat" type="text" value="${s.category}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <input id="ed-smp-name" type="text" value="${escapeHtml(s.name)}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <input id="ed-smp-unit" type="text" value="${escapeHtml(s.unit)}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
+          <input id="ed-smp-cat" type="text" value="${escapeHtml(s.category)}" class="w-full rounded-xl border border-slate-300 px-3 py-2" />
         </div>
         <div class="flex justify-end gap-2 mt-4">
           <button onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-semibold border border-slate-200">Cancel</button>
@@ -3573,7 +3574,7 @@ async function adjustOfficeSampleStock(sampleId) {
             <div class="bg-white rounded-2xl border border-slate-200 p-5">
               <h2 class="text-base font-bold text-slate-900 mb-3">Doctor History Lookup (Last Visit Per Employee)</h2>
               <select onchange="historyDoctorId=this.value; renderMain();" class="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs mb-4">
-                ${appState.doctors.map(d => `<option value="${d.id}" ${d.id === historyDoctorId ? "selected" : ""}>${d.name} (${d.location})</option>`).join("")}
+                ${appState.doctors.map(d => `<option value="${d.id}" ${d.id === historyDoctorId ? "selected" : ""}>${escapeHtml(d.name)} (${escapeHtml(d.location)})</option>`).join("")}
               </select>
               <div class="space-y-2 text-xs">
                 ${docVisits.length === 0
@@ -3583,7 +3584,7 @@ async function adjustOfficeSampleStock(sampleId) {
                     const smp = appState.samples.find(s => s.id === v.sample_id)?.name || "None";
                     return `
                       <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                        <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">${v.visit_date}</span></div>
+                        <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">${escapeHtml(v.visit_date)}</span></div>
                         <p class="text-slate-600 mt-1 tabular-nums">${escapeHtml(v.visit_type)} · ${v.sample_qty} × ${escapeHtml(smp)}</p>
                         ${v.notes ? `<p class="text-slate-500 mt-1">${escapeHtml(v.notes)}</p>` : ""}
                       </div>
@@ -3661,9 +3662,9 @@ async function adjustOfficeSampleStock(sampleId) {
                 const rep = appState.profiles.find(p => p.id === v.member_id)?.full_name || "";
                 return `
                   <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">${v.variance_date}</span></div>
+                    <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">${escapeHtml(v.variance_date)}</span></div>
                     <p class="text-slate-600 mt-1 tabular-nums">${v.variance_type === "over_quota" ? ">Target" : "<Target"} (${v.visit_count}/${v.target_count}) · Status: <strong>${escapeHtml(v.status)}</strong></p>
-                    <p class="text-slate-500 mt-1">${v.reason || ""}</p>
+                    <p class="text-slate-500 mt-1">${escapeHtml(v.reason || "")}</p>
                     <div class="flex gap-2 mt-2">
                       <button onclick="decideVariance('${v.id}', 'Approved')" class="px-2.5 py-1 rounded-lg bg-emerald-600 text-white font-semibold">Approve</button>
                       <button onclick="decideVariance('${v.id}', 'Rejected')" class="px-2.5 py-1 rounded-lg bg-rose-600 text-white font-semibold">Reject</button>
@@ -3683,7 +3684,7 @@ async function adjustOfficeSampleStock(sampleId) {
                   <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
                     <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">$${g.estimated_price}</span></div>
                     <p class="font-semibold text-slate-800 mt-1">${escapeHtml(g.gift_details)}</p>
-                    <p class="text-slate-500">Buyer: ${escapeHtml(g.buyer_role)} · Status: <strong>${g.status}</strong></p>
+                    <p class="text-slate-500">Buyer: ${escapeHtml(g.buyer_role)} · Status: <strong>${escapeHtml(g.status)}</strong></p>
                     <div class="flex flex-wrap gap-1.5 mt-2">
                       <button onclick="updateGiftStatus('${g.id}', 'Under Review')" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 font-semibold">Under Review</button>
                       <button onclick="updateGiftStatus('${g.id}', 'Approved')" class="px-2 py-1 rounded-lg bg-emerald-600 text-white font-semibold">Approve</button>
@@ -3705,7 +3706,7 @@ async function adjustOfficeSampleStock(sampleId) {
                 const rep = appState.profiles.find(p => p.id === d.member_id)?.full_name || "";
                 return `
                   <div class="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                    <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">${d.requested_date}</span></div>
+                    <div class="flex justify-between font-bold"><span>${escapeHtml(rep)}</span><span class="tabular-nums">${escapeHtml(d.requested_date)}</span></div>
                     <p class="text-slate-500 mt-1">${escapeHtml(d.reason || "")} · Status: <strong>${escapeHtml(d.status)}</strong></p>
                     <div class="flex gap-1.5 mt-2">
                       <button onclick="updateDayOffStatus('${d.id}', 'Under Review')" class="px-2 py-1 rounded-lg bg-amber-100 text-amber-900 font-semibold">Under Review</button>
@@ -3862,7 +3863,7 @@ async function adjustOfficeSampleStock(sampleId) {
                   <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
                     <div>
                       <p class="font-bold text-slate-900">${escapeHtml(t.title)}</p>
-                      <p class="text-slate-500 mt-0.5 tabular-nums">${t.scope.toUpperCase()} · ${t.priority} · ${owner} · Due ${t.due_date}</p>
+                      <p class="text-slate-500 mt-0.5 tabular-nums">${escapeHtml(t.scope.toUpperCase())} · ${escapeHtml(t.priority)} · ${escapeHtml(owner)} · Due ${escapeHtml(t.due_date)}</p>
                     </div>
                     <button onclick="cycleTaskStatus('${t.id}')" class="px-3 py-1.5 rounded-lg bg-white border border-slate-200 font-semibold">${escapeHtml(t.status)}</button>
                   </div>
