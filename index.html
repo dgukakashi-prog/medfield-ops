@@ -737,7 +737,8 @@
   }
 });
 
-      const profiles = profRes?.data || [];
+     
+const profiles = profRes?.data || [];
 const me = profiles.find(
   p => (p.email || "").toLowerCase() === normalizedEmail
 );
@@ -766,6 +767,43 @@ const officeRes = me.is_platform_admin === true
 if (officeRes.error) {
   console.error("Office stock load error:", officeRes.error);
 }
+
+const previousActiveId = activeUserId;
+appState = {
+  schedule_rules: ruleRes?.data || { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
+  allowlist: allowRes?.data || [],
+  profiles,
+  doctors: docRes?.data || [],
+  doctor_assignments: assignRes?.data || [],
+  samples: smpRes?.data || [],
+  office_sample_balances: officeRes?.data || [],
+  member_sample_inventory: invRes?.data || [],
+  sample_pickups: pickRes?.data || [],
+  field_sessions: sessRes?.data || [],
+  quota_variances: varRes?.data || [],
+  visits: visRes?.data || [],
+  plans: planRes?.data || [],
+  gift_requests: giftRes?.data || [],
+  day_off_requests: dayRes?.data || [],
+  tasks: taskRes?.data || [],
+  notifications: notifRes?.data || []
+};
+
+const profiles = profRes?.data || [];
+const me = profiles.find(
+  p => (p.email || "").toLowerCase() === normalizedEmail
+);
+
+if (!me) {
+  showToast(
+    "Your email is not registered in profiles yet. Ask the Supervisor to add you.",
+    "rose"
+  );
+
+  try {
+    await sb.auth.signOut();
+  } catch (err) {
+    console.error("Sign out after missing profile error:", err);
   }
 
   document.getElementById("app-shell")?.classList.add("hidden");
@@ -781,26 +819,26 @@ if (officeRes.error) {
   console.error("Office stock load error:", officeRes.error);
 }
 
-      const previousActiveId = activeUserId;
-      appState = {
-        schedule_rules: ruleRes?.data || { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
-        allowlist: allowRes?.data || [],
-        profiles,
-        doctors: docRes?.data || [],
-        doctor_assignments: assignRes?.data || [],
-        samples: smpRes?.data || [],
-office_sample_balances: officeRes?.data || [],
-member_sample_inventory: invRes?.data || [],
-        sample_pickups: pickRes?.data || [],
-        field_sessions: sessRes?.data || [],
-        quota_variances: varRes?.data || [],
-        visits: visRes?.data || [],
-        plans: planRes?.data || [],
-        gift_requests: giftRes?.data || [],
-        day_off_requests: dayRes?.data || [],
-        tasks: taskRes?.data || [],
-        notifications: notifRes?.data || []
-      };
+const previousActiveId = activeUserId;
+appState = {
+  schedule_rules: ruleRes?.data || { mode_name: "Standard (5 Work + 1 Meeting)", daily_target: 12, weekly_target: 60 },
+  allowlist: allowRes?.data || [],
+  profiles,
+  doctors: docRes?.data || [],
+  doctor_assignments: assignRes?.data || [],
+  samples: smpRes?.data || [],
+  office_sample_balances: officeRes?.data || [],
+  member_sample_inventory: invRes?.data || [],
+  sample_pickups: pickRes?.data || [],
+  field_sessions: sessRes?.data || [],
+  quota_variances: varRes?.data || [],
+  visits: visRes?.data || [],
+  plans: planRes?.data || [],
+  gift_requests: giftRes?.data || [],
+  day_off_requests: dayRes?.data || [],
+  tasks: taskRes?.data || [],
+  notifications: notifRes?.data || []
+};
 
       activeUserId = (previousActiveId && profiles.some(p => p.id === previousActiveId))
         ? previousActiveId
