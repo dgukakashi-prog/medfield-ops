@@ -738,15 +738,50 @@
 });
 
       const profiles = profRes?.data || [];
-const me = profiles.find(p => (p.email || "").toLowerCase() === normalizedEmail);
+const me = profiles.find(
+  p => (p.email || "").toLowerCase() === normalizedEmail
+);
 
 if (!me) {
-  showToast("Your email is not registered in profiles yet. Ask the Supervisor to add you.", "rose");
+  showToast(
+    "Your email is not registered in profiles yet. Ask the Supervisor to add you.",
+    "rose"
+  );
+
   try {
     await sb.auth.signOut();
   } catch (err) {
     console.error("Sign out after missing profile error:", err);
   }
+
+  document.getElementById("app-shell")?.classList.add("hidden");
+  document.getElementById("auth-screen")?.classList.remove("hidden");
+  return;
+}
+
+const officeRes = me.is_platform_admin === true
+  ? await sb.rpc("get_office_sample_balances")
+  : { data: [], error: null };
+
+if (officeRes.error) {
+  console.error("Office stock load error:", officeRes.error);
+}const profiles = profRes?.data || [];
+const me = profiles.find(
+  p => (p.email || "").toLowerCase() === normalizedEmail
+);
+
+if (!me) {
+  showToast(
+    "Your email is not registered in profiles yet. Ask the Supervisor to add you.",
+    "rose"
+  );
+
+  try {
+    await sb.auth.signOut();
+  } catch (err) {
+    console.error("Sign out after missing profile error:", err);
+  }
+
   document.getElementById("app-shell")?.classList.add("hidden");
   document.getElementById("auth-screen")?.classList.remove("hidden");
   return;
@@ -759,16 +794,6 @@ const officeRes = me.is_platform_admin === true
 if (officeRes.error) {
   console.error("Office stock load error:", officeRes.error);
 }
-        showToast("Your email is not registered in profiles yet. Ask the Supervisor to add you.", "rose");
-        try {
-          await sb.auth.signOut();
-        } catch (err) {
-          console.error("Sign out after missing profile error:", err);
-        }
-        document.getElementById("app-shell")?.classList.add("hidden");
-        document.getElementById("auth-screen")?.classList.remove("hidden");
-        return;
-      }
 
       const previousActiveId = activeUserId;
       appState = {
