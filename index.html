@@ -2210,7 +2210,6 @@ if (offlineQueue.some(item =>
 )) {
   return showToast("This cancellation is already queued.", "amber");
 }
-  }
 
   const reason = prompt("Reason for cancelling this visit:");
   if (reason === null) return;
